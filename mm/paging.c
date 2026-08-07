@@ -70,6 +70,7 @@
 #include "idt.h"
 #include "string.h"
 #include "terminal.h"
+#include "usermode.h"
 
 #define ENTRIES 1024
 
@@ -170,6 +171,26 @@ static void page_fault_handler(struct registers *regs)
 	int write    =  regs->err_code & 0x2;   /* was it a write?            */
 	int user     =  regs->err_code & 0x4;   /* did ring 3 do it?          */
 	int reserved =  regs->err_code & 0x8;   /* malformed table entry      */
+
+	/* A fault from ring 3 is the program's problem, not the kernel's.
+	 *
+	 * This is the point of having a privilege boundary at all: user code can
+	 * be wrong, or malicious, and the right response is to stop THAT program
+	 * and carry on. A kernel that halts because a program dereferenced a bad
+	 * pointer has a boundary in name only.
+	 *
+	 * A ring 0 fault is different and still fatal - it means the kernel itself
+	 * is broken, and continuing in an unknown state is how a bug becomes an
+	 * exploit. */
+	if (user) {
+		kprintf("\n*** program terminated: %s at 0x%x (eip 0x%x)\n",
+		        present ? (write ? "wrote to read-only memory"
+		                         : "protection violation")
+		                : "touched unmapped memory",
+		        faulting_address, regs->eip);
+
+		usermode_return();   /* back to the kernel; does not return */
+	}
 
 	kprintf("\n*** PAGE FAULT at 0x%x\n", faulting_address);
 	kprintf("    eip=0x%x  cause: %s, %s, %s%s\n",

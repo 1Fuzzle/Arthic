@@ -52,7 +52,10 @@ gcc $CFLAGS -c user/prog.c -o "$BUILD/prog.o"
 
 echo "linking    user program"
 ld -m elf_i386 -T user/prog.ld -o "$BUILD/prog.elf" "$BUILD/prog.o"
-objcopy -O binary "$BUILD/prog.elf" "$BUILD/prog.bin"
+
+# The ELF file itself is what gets stored on the disk now - no objcopy to a
+# flat image. The whole point is that the program describes itself.
+cp "$BUILD/prog.elf" "$BUILD/prog.bin"
 
 # Turn the raw bytes into a C array using only coreutils, so the build does not
 # depend on xxd being installed.

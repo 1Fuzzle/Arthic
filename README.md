@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v1.8
+## Current state - v1.9
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -34,8 +34,10 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - ATA PIO disk driver: LBA28, read and write sectors, with cache flush
 - ArthicFS: superblock, 64-entry directory, block bitmap, contiguous files -
   and files survive a reboot
-- A program loader: reads a flat binary off the disk, maps it at 0x20000000
-  read-only, maps a writable stack, and runs it in ring 3
+- An ELF loader: parses program headers, maps each segment with its own
+  permissions (code read-only, data writable), zeroes `.bss` rather than storing
+  it, and takes the entry point from the file
+- A ring 3 fault kills the program, not the kernel
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
   `format`, `install`, `run`, `user`, `wptest`, `echo`, `clear`
@@ -96,7 +98,7 @@ Arthic/
 │   └── fs.c          ArthicFS - format, directory, block bitmap, files
 ├── user/
 │   ├── prog.c        a program - built separately, knows nothing of the kernel
-│   └── prog.ld       linked at 0x20000000, above any identity-mapped RAM
+│   └── prog.ld       linked at 0x20000000, with separate text and data segments
 ├── mm/
 │   ├── pmm.c         physical frame allocator (bitmap)
 │   ├── paging.c      page directory and tables, MMU setup, page fault handler
@@ -169,10 +171,11 @@ Should be `0`.
 13. ~~Wait queues~~ (v1.6)
 14. ~~Filesystem~~ (v1.7)
 15. ~~Loading a program from disk~~ (v1.8)
-16. **Next:** ELF instead of a flat binary - per-segment permissions, a real
-    entry point, and `.bss` described rather than stored
-17. Later: block-mapped files, so a file need not be contiguous and can grow
-18. Later: 64-bit long mode, and with it a real NX bit
+16. ~~ELF loading~~ (v1.9)
+17. **Next:** more than one program at once - a task per program, each with its
+    own page directory
+18. Later: block-mapped files, so a file need not be contiguous and can grow
+19. Later: 64-bit long mode, and with it a real NX bit
 
 ## Reference
 

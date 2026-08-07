@@ -6,4 +6,9 @@ void usermode_init(void);
 void usermode_run(void);    /* enters ring 3; returns when the program exits */
 void usermode_exit(void);   /* called from the SYS_EXIT handler */
 
+/* Abandon ring 3 immediately and resume the kernel where usermode_jump was
+ * called. Implemented in interrupts.s. Used by SYS_EXIT and by the page fault
+ * handler when a program faults. */
+void usermode_return(void);
+
 #endif
