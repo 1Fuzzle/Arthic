@@ -22,6 +22,7 @@
  */
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>   /* variadic arguments — also freestanding-safe */
 
 /* ---- The screen -----------------------------------------------------------
  * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
@@ -263,6 +264,140 @@ void terminal_write(const char *str) {
 		terminal_putchar(str[i]);
 }
 
+
+/* ---- Number printing ------------------------------------------------------
+ * There is no itoa, no sprintf, no way to turn 42 into "42". We write it.
+ *
+ * The algorithm is the one you'd use on paper, and it produces digits in the
+ * WRONG ORDER. Repeatedly divide by the base and take the remainder:
+ *
+ *     1234 % 10 = 4   ->  1234 / 10 = 123
+ *      123 % 10 = 3   ->   123 / 10 = 12
+ *       12 % 10 = 2   ->    12 / 10 = 1
+ *        1 % 10 = 1   ->     1 / 10 = 0   (stop)
+ *
+ * That gives 4, 3, 2, 1 — least significant digit first. So we collect them
+ * into a small buffer and then walk it backwards to print. Every integer
+ * formatter ever written does this, including glibc's.
+ *
+ * `base` makes the same code handle decimal and hexadecimal. 32 chars is
+ * comfortably enough: the longest possible output here is a 32-bit number in
+ * base 2, which would be 32 digits, and we never go below base 8.
+ */
+static void terminal_write_uint(uint32_t value, uint32_t base) {
+	const char *digits = "0123456789abcdef";
+	char buf[32];
+	size_t i = 0;
+
+	/* Special case: the loop below produces nothing at all for zero, because
+	 * the condition fails immediately. Easy bug to miss — 0 would print as
+	 * empty string. */
+	if (value == 0) {
+		terminal_putchar('0');
+		return;
+	}
+
+	while (value != 0) {
+		buf[i++] = digits[value % base];
+		value /= base;
+	}
+
+	/* Walk backwards. Note `while (i-- > 0)` rather than `while (i > 0)`:
+	 * i-- yields the old value then decrements, so this tests i against 0 and
+	 * leaves us with a valid index. Writing `buf[--i]` inside the loop body
+	 * would work too; this idiom is just the compact form. */
+	while (i-- > 0)
+		terminal_putchar(buf[i]);
+}
+
+static void terminal_write_int(int32_t value) {
+	uint32_t magnitude;
+
+	if (value < 0) {
+		terminal_putchar('-');
+		/* Careful here. You cannot write -value and be safe: the most
+		 * negative int32 (-2147483648) has no positive counterpart, so
+		 * negating it overflows, which is undefined behaviour in C — the
+		 * compiler is entitled to do anything at all.
+		 *
+		 * Casting to unsigned FIRST sidesteps it. Unary minus on an unsigned
+		 * type is defined as modular arithmetic, so this is well-defined and
+		 * gives exactly the magnitude we want. This is a real bug that ships
+		 * in real code. */
+		magnitude = -(uint32_t)value;
+	} else {
+		magnitude = (uint32_t)value;
+	}
+
+	terminal_write_uint(magnitude, 10);
+}
+
+/* ---- kprintf --------------------------------------------------------------
+ * Our printf. The k prefix is convention for "kernel version of".
+ *
+ * The `...` makes it variadic — it takes any number of further arguments. The
+ * catch is that C gives us no way to know how many there are or what types
+ * they have. printf solves this by trusting the format string: a %d is a
+ * promise that an int was passed. Nothing verifies that promise at runtime.
+ * Pass the wrong type and you read garbage off the stack. That is why format
+ * string bugs are a whole category of security vulnerability.
+ *
+ * va_list / va_start / va_arg / va_end walk the arguments. They are macros
+ * from stdarg.h, which is safe here because it contains no library code.
+ *
+ * Supported: %d %u %x %s %c %%
+ */
+void kprintf(const char *fmt, ...) {
+	va_list args;
+	va_start(args, fmt);      /* start reading after `fmt` */
+
+	for (size_t i = 0; fmt[i] != '\0'; i++) {
+		if (fmt[i] != '%') {
+			terminal_putchar(fmt[i]);
+			continue;
+		}
+
+		i++;   /* step past the % to look at the specifier */
+
+		switch (fmt[i]) {
+		case 'd':
+			terminal_write_int(va_arg(args, int32_t));
+			break;
+		case 'u':
+			terminal_write_uint(va_arg(args, uint32_t), 10);
+			break;
+		case 'x':
+			terminal_write_uint(va_arg(args, uint32_t), 16);
+			break;
+		case 's':
+			terminal_write(va_arg(args, const char *));
+			break;
+		case 'c':
+			/* Note `int`, not `char`. Anything smaller than int is promoted
+			 * to int when passed through `...`, so asking va_arg for a char
+			 * would read the wrong width. A genuine trap. */
+			terminal_putchar((char) va_arg(args, int));
+			break;
+		case '%':
+			terminal_putchar('%');
+			break;
+		case '\0':
+			/* String ended on a trailing %. Back up so the outer loop sees
+			 * the terminator and stops, instead of running off the end. */
+			i--;
+			break;
+		default:
+			/* Unknown specifier: print it literally rather than silently
+			 * swallowing it, so mistakes are visible. */
+			terminal_putchar('%');
+			terminal_putchar(fmt[i]);
+			break;
+		}
+	}
+
+	va_end(args);
+}
+
 /* ---- Entry point ----------------------------------------------------------
  * boot.s calls this. Note it never returns — an OS kernel has nothing to
  * return to.
@@ -277,7 +412,7 @@ void kernel_main(void) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v0.1\n");
+	terminal_write("Arthic kernel v0.4\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -292,16 +427,23 @@ void kernel_main(void) {
 	 * edits it. Declared as a pointer it would point at read-only memory and
 	 * writing through it would be undefined behaviour. Same-looking text,
 	 * completely different thing.                                          */
-	terminal_set_colour(vga_entry_colour(VGA_GREEN, VGA_BLACK));
-	char line[] = "line A - scrolling up, one row at a time\n";
-	for (char c = 'A'; c <= 'T'; c++) {
-		line[5] = c;
-		terminal_write(line);
-	}
+	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
+	kprintf("kprintf is alive.\n\n");
 
-	/* Leave the cursor sitting after a prompt, so you can see it blinking. */
+	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
+	kprintf("  decimal      %d\n", 1234);
+	kprintf("  negative     %d\n", -4321);
+	kprintf("  zero         %d\n", 0);
+	kprintf("  int minimum  %d\n", (int32_t) 0x80000000);
+	kprintf("  unsigned     %u\n", 4294967295u);
+	kprintf("  hex          0x%x\n", 0xDEADBEEFu);
+	kprintf("  string       %s\n", "Arthic");
+	kprintf("  character    %c\n", 'A');
+	kprintf("  percent      100%%\n");
+	kprintf("  mixed        %s v0.%d at 0x%x\n", "kernel", 4, 0xB8000u);
+
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
-	terminal_write("\narthic> ");
+	kprintf("\narthic> ");
 
 	/* Fall off the end and boot.s parks the CPU. */
 }
