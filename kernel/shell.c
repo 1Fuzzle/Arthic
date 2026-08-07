@@ -16,6 +16,7 @@
 #include "string.h"
 #include "pmm.h"
 #include "paging.h"
+#include "kheap.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,15 +40,17 @@ static void command_help(void)
 	kprintf("  echo <text>   print text back\n");
 	kprintf("  mem           physical memory usage\n");
 	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
+	kprintf("  heap          heap usage\n");
+	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  wptest        try to write to kernel code (should page fault)\n");
 	kprintf("  clear         clear the screen\n");
 }
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.0 — a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.1 — a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Physical memory manager and paging. No filesystem yet.\n");
+	kprintf("Frame allocator, paging, and a kernel heap. No filesystem yet.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -93,6 +96,52 @@ static void command_wptest(void)
 	kprintf("survived — WRITE PROTECTION IS NOT WORKING\n");
 }
 
+static void command_heap(void)
+{
+	uint32_t total, used, blocks;
+	kheap_stats(&total, &used, &blocks);
+
+	kprintf("  total  %u KB\n", total / 1024);
+	kprintf("  used   %u bytes across %u blocks\n", used, blocks);
+	kprintf("  free   %u KB\n", (total - used) / 1024);
+}
+
+/* Exercise the allocator and show what it does. Watch the addresses: the third
+ * allocation reuses the space freed by the first, which is the whole point. */
+static void command_heaptest(void)
+{
+	char *a = (char *) kmalloc(64);
+	char *b = (char *) kmalloc(128);
+
+	if (!a || !b) {
+		kprintf("allocation failed\n");
+		return;
+	}
+
+	kprintf("a = kmalloc(64)   -> 0x%x\n", (uint32_t) a);
+	kprintf("b = kmalloc(128)  -> 0x%x\n", (uint32_t) b);
+
+	/* Prove the memory is genuinely usable, not just an address. */
+	for (int i = 0; i < 63; i++)
+		a[i] = 'x';
+	a[63] = '\0';
+	kprintf("wrote to a, reads back: %c%c%c...\n", a[0], a[1], a[2]);
+
+	kfree(a);
+	kprintf("kfree(a)\n");
+
+	char *c = (char *) kmalloc(32);
+	kprintf("c = kmalloc(32)   -> 0x%x  %s\n", (uint32_t) c,
+	        ((uint32_t) c == (uint32_t) a) ? "(reused a's space)" : "");
+
+	kprintf("double free check: ");
+	kfree(c);
+	kfree(c);
+
+	kfree(b);
+	kprintf("all freed\n");
+}
+
 static void command_ticks(void)
 {
 	uint32_t t = timer_get_ticks();
@@ -116,6 +165,10 @@ static void execute(const char *line)
 		command_mem();
 	else if (kstrcmp(line, "alloc") == 0)
 		command_alloc();
+	else if (kstrcmp(line, "heap") == 0)
+		command_heap();
+	else if (kstrcmp(line, "heaptest") == 0)
+		command_heaptest();
 	else if (kstrcmp(line, "wptest") == 0)
 		command_wptest();
 	else if (kstrcmp(line, "clear") == 0)

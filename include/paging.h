@@ -28,7 +28,7 @@ void paging_init(void);
  * code read-only after the initial mapping is built. */
 void paging_set_flags(uint32_t virtual_addr, uint32_t flags);
 
-/* How much memory is identity-mapped at boot. */
-uint32_t paging_identity_limit(void);
+/* How much memory is identity-mapped. */
+uint32_t paging_mapped_limit(void);
 
 #endif

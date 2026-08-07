@@ -188,6 +188,48 @@ uint32_t pmm_alloc_frame(void)
 	return 0;   /* out of memory */
 }
 
+uint32_t pmm_alloc_frames(uint32_t count)
+{
+	if (count == 0)
+		return 0;
+
+	/* Sliding window: walk forward, and every time a used frame appears,
+	 * restart the run from the frame after it. One pass, no backtracking.
+	 *
+	 * This is where a bitmap starts to show its limits — finding a large
+	 * contiguous run is O(n) and can fail even when plenty of memory is
+	 * free, because it is scattered. That is fragmentation, and it is a real
+	 * problem rather than a theoretical one. Buddy allocators exist to make
+	 * this cheap. Ours is honest about being simple. */
+	uint32_t run_start = 0;
+	uint32_t run_length = 0;
+
+	for (uint32_t f = 0; f < total_frames; f++) {
+		if (frame_test(f)) {
+			run_length = 0;
+			run_start = f + 1;
+			continue;
+		}
+
+		run_length++;
+
+		if (run_length == count) {
+			for (uint32_t i = 0; i < count; i++) {
+				frame_set(run_start + i);
+				used_frames++;
+			}
+			return run_start * PAGE_SIZE;
+		}
+	}
+
+	return 0;   /* no contiguous run that large */
+}
+
+uint32_t pmm_memory_top(void)
+{
+	return total_frames * PAGE_SIZE;
+}
+
 void pmm_free_frame(uint32_t addr)
 {
 	uint32_t frame = addr / PAGE_SIZE;

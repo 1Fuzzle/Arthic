@@ -50,7 +50,7 @@ done
 # C sources
 for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
-           mm/pmm.c mm/paging.c lib/string.c; do
+           mm/pmm.c mm/paging.c mm/kheap.c lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
 	echo "compiling  $src"
 	gcc $CFLAGS -c "$src" -o "$obj"

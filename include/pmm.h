@@ -20,6 +20,15 @@ void pmm_init(struct multiboot_info *mbi);
 uint32_t pmm_alloc_frame(void);
 void     pmm_free_frame(uint32_t addr);
 
+/* Allocate `count` CONSECUTIVE frames and return the address of the first.
+ * Needed by anything wanting a contiguous region larger than one page — the
+ * heap, and later DMA buffers, which hardware requires to be contiguous in
+ * physical memory because devices do not go through the MMU. */
+uint32_t pmm_alloc_frames(uint32_t count);
+
+/* One past the highest physical address the memory map mentioned. */
+uint32_t pmm_memory_top(void);
+
 uint32_t pmm_total_frames(void);
 uint32_t pmm_used_frames(void);
 uint32_t pmm_free_frames(void);

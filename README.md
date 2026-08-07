@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state — v1.0
+## Current state — v1.1
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -13,11 +13,14 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - PIT timer driving a tick counter
 - PS/2 keyboard driver with Shift and Caps Lock
 - Physical memory manager: bitmap frame allocator driven by the BIOS memory map
-- Paging: 8 MB identity-mapped, kernel code and rodata read-only, CR0.WP set,
-  all kernel pages supervisor-only, page fault handler reporting CR2
-- A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `wptest`, `echo`, `clear`
+- Paging: all RAM identity-mapped, kernel code and rodata read-only, CR0.WP
+  set, all kernel pages supervisor-only, page fault handler reporting CR2
+- Kernel heap: 1 MB, first-fit with block splitting and coalescing, magic-number
+  guards against double free and corruption
+- A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
+  `wptest`, `echo`, `clear`
 
-No heap, no filesystem, no user mode yet.
+No filesystem, no user mode yet.
 
 ### On W^X — a known gap
 
@@ -70,7 +73,8 @@ Arthic/
 │   └── timer.c       PIT tick counter
 ├── mm/
 │   ├── pmm.c         physical frame allocator (bitmap)
-│   └── paging.c      page directory and tables, MMU setup, page fault handler
+│   ├── paging.c      page directory and tables, MMU setup, page fault handler
+│   └── kheap.c       kmalloc / kfree — variable-sized allocation
 ├── lib/
 │   └── string.c      kmemset, kmemcpy, kstrcmp — no libc exists
 ├── include/          every header
@@ -128,9 +132,10 @@ Should be `0`.
 5. ~~IDT, PIC remap, timer~~ (v0.6) and ~~keyboard, shell~~ (v0.7)
 6. ~~Physical memory manager~~ (v0.9)
 7. ~~Paging~~ (v1.0) — write protection done; NX blocked until PAE or long mode
-8. **Next:** a heap (kmalloc) on top of the frame allocator
-9. Later: TSS and user mode
+8. ~~Heap (kmalloc)~~ (v1.1)
+9. **Next:** TSS and user mode — ring 3, and a syscall gate
 10. Later: 64-bit long mode — and with it, a real NX bit
+11. Later: a filesystem
 
 ## Reference
 

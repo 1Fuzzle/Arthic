@@ -25,14 +25,23 @@
  * low 12 are flags. That works because pages are 4 KB aligned, so the low 12
  * bits of any page address are always zero and would otherwise be wasted.
  *
- * THE DANGEROUS MOMENT
+ * WHY WE MAP ALL OF RAM
  *
- * The instruction after the one that enables paging is fetched through the MMU.
- * If the address it lives at is not mapped, the CPU faults trying to fetch it,
- * faults trying to reach the fault handler, and triple-faults. So before
- * switching on, we identity-map the kernel — virtual address X maps to physical
- * address X — which makes the transition invisible to everything already
- * running.
+ * We identity-map every usable physical address — virtual X to physical X. A
+ * mature kernel does not do this, but it makes everything above this layer
+ * dramatically simpler: any frame the allocator hands out is immediately usable
+ * without mapping it first. The heap depends on that.
+ *
+ * The page tables themselves come from the frame allocator, which raises the
+ * obvious question of how we write to them before they are mapped. The answer
+ * is timing: paging is still OFF while we build them, so every physical address
+ * is directly writable. By the time it is on, everything is mapped. Ordering is
+ * doing real work here.
+ *
+ * There is also a dangerous moment worth naming. The instruction after the one
+ * that enables paging is fetched THROUGH the MMU. If its address were not
+ * mapped, the CPU would fault fetching it, fault reaching the handler, and
+ * triple-fault. Identity mapping makes the transition invisible.
  *
  * ON W^X, HONESTLY
  *
@@ -64,44 +73,47 @@
 
 #define ENTRIES 1024
 
-/* How much to identity-map at boot. 8 MB comfortably covers the kernel, the
- * PMM bitmap and all the low-memory hardware regions including VGA. */
-#define IDENTITY_TABLES 2
-#define IDENTITY_LIMIT  (IDENTITY_TABLES * ENTRIES * PAGE_SIZE)
+#define TABLE_COVERAGE (ENTRIES * PAGE_SIZE)   /* one page table covers 4 MB */
 
 /* The CPU requires these to be page-aligned — the low 12 bits of the address
  * are used for flags, so a misaligned table would have its address silently
  * mangled. `aligned(4096)` is the compiler doing that for us.
  *
- * These are static arrays rather than frames from the PMM because the initial
- * mapping has to exist before we can safely allocate anything. Page tables
- * created later will come from pmm_alloc_frame. */
+ * The directory is static; the page tables come from the frame allocator. */
 static uint32_t page_directory[ENTRIES] __attribute__((aligned(4096)));
-static uint32_t page_tables[IDENTITY_TABLES][ENTRIES] __attribute__((aligned(4096)));
+static uint32_t mapped_limit = 0;
 
 /* From linker.ld — the boundaries of our own code. */
 extern uint32_t kernel_text_start;
-extern uint32_t kernel_text_end;
 extern uint32_t kernel_rodata_end;
 
-static uint32_t *table_for(uint32_t virtual_addr)
+/* Find the page table entry for a virtual address, or 0 if unmapped.
+ *
+ * A virtual address splits into three parts:
+ *   bits 31-22  which page directory entry  (which 4 MB region)
+ *   bits 21-12  which page table entry      (which page within it)
+ *   bits 11-0   offset within the page      (untouched by translation)
+ */
+static uint32_t *entry_for(uint32_t virtual_addr)
 {
-	uint32_t dir_index = virtual_addr >> 22;          /* top 10 bits    */
-	if (dir_index >= IDENTITY_TABLES)
+	uint32_t dir_index = virtual_addr >> 22;
+	uint32_t tbl_index = (virtual_addr >> 12) & 0x3FF;
+
+	if (!(page_directory[dir_index] & PAGE_PRESENT))
 		return 0;
-	return page_tables[dir_index];
+
+	uint32_t *table = (uint32_t *)(page_directory[dir_index] & 0xFFFFF000);
+	return &table[tbl_index];
 }
 
 void paging_set_flags(uint32_t virtual_addr, uint32_t flags)
 {
-	uint32_t *table = table_for(virtual_addr);
-	if (!table)
+	uint32_t *entry = entry_for(virtual_addr);
+	if (!entry)
 		return;
 
-	uint32_t table_index = (virtual_addr >> 12) & 0x3FF;   /* middle 10 bits */
-
 	/* Keep the physical address, replace the flags. */
-	table[table_index] = (table[table_index] & 0xFFFFF000) | flags;
+	*entry = (*entry & 0xFFFFF000) | flags;
 
 	/* The CPU caches translations in the TLB. Change an entry without
 	 * telling it and it will keep using the stale one — a bug that looks
@@ -150,19 +162,39 @@ void paging_init(void)
 {
 	kmemset(page_directory, 0, sizeof(page_directory));
 
-	/* Identity-map the low memory: virtual X to physical X.
+	uint32_t top = pmm_memory_top();
+
+	/* Round up, so a partial final 4 MB region still gets a table. */
+	uint32_t tables_needed = (top + TABLE_COVERAGE - 1) / TABLE_COVERAGE;
+	if (tables_needed > ENTRIES)
+		tables_needed = ENTRIES;
+
+	/* Identity-map all of it: virtual X to physical X.
 	 *
 	 * Supervisor-only from the outset (no PAGE_USER). Ring 3 will get its
-	 * own mappings when user mode exists; it should never be able to see
-	 * kernel memory just because the kernel happened to map it first. */
-	for (uint32_t t = 0; t < IDENTITY_TABLES; t++) {
-		for (uint32_t i = 0; i < ENTRIES; i++) {
-			uint32_t physical = (t * ENTRIES + i) * PAGE_SIZE;
-			page_tables[t][i] = physical | PAGE_PRESENT | PAGE_WRITE;
+	 * own mappings when user mode exists; it must never see kernel memory
+	 * merely because the kernel mapped it first. */
+	for (uint32_t t = 0; t < tables_needed; t++) {
+		/* A page table is exactly one frame — 1024 entries of 4 bytes is
+		 * 4096 bytes. Not a coincidence. */
+		uint32_t table_phys = pmm_alloc_frame();
+		if (!table_phys) {
+			kprintf("paging: out of memory building page tables\n");
+			for (;;)
+				__asm__ volatile ("cli; hlt");
 		}
-		page_directory[t] = ((uint32_t) page_tables[t])
-		                    | PAGE_PRESENT | PAGE_WRITE;
+
+		uint32_t *table = (uint32_t *) table_phys;
+
+		for (uint32_t i = 0; i < ENTRIES; i++) {
+			uint32_t physical = t * TABLE_COVERAGE + i * PAGE_SIZE;
+			table[i] = physical | PAGE_PRESENT | PAGE_WRITE;
+		}
+
+		page_directory[t] = table_phys | PAGE_PRESENT | PAGE_WRITE;
 	}
+
+	mapped_limit = tables_needed * TABLE_COVERAGE;
 
 	/* Now take write permission away from our own code and constants.
 	 * Everything from the start of .text to the end of .rodata becomes
@@ -171,9 +203,11 @@ void paging_init(void)
 	uint32_t ro_end     = ((uint32_t) &kernel_rodata_end + PAGE_SIZE - 1)
 	                      & ~(PAGE_SIZE - 1);
 
-	for (uint32_t addr = text_start; addr < ro_end; addr += PAGE_SIZE)
-		page_tables[addr >> 22][(addr >> 12) & 0x3FF] =
-			addr | PAGE_PRESENT;    /* present, NOT writable */
+	for (uint32_t addr = text_start; addr < ro_end; addr += PAGE_SIZE) {
+		uint32_t *entry = entry_for(addr);
+		if (entry)
+			*entry = (*entry & 0xFFFFF000) | PAGE_PRESENT;  /* not writable */
+	}
 
 	isr_install_handler(14, page_fault_handler);
 
@@ -200,7 +234,7 @@ void paging_init(void)
 	/* Anything past here is running through the MMU. */
 }
 
-uint32_t paging_identity_limit(void)
+uint32_t paging_mapped_limit(void)
 {
-	return IDENTITY_LIMIT;
+	return mapped_limit;
 }
