@@ -45,6 +45,7 @@ drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter
 mm/pmm.c             physical frame allocator, bitmap, driven by multiboot mmap
+mm/paging.c          page directory/tables, CR0.WP, page fault handler
 lib/string.c         kmemset, kmemcpy, kstrcmp, kstartswith
 include/             all headers
 ```
@@ -72,7 +73,9 @@ grows, the new thing wants its own file.
 4. ~~GDT~~ done (v0.5) — no TSS
 5. ~~IDT, PIC remap, timer~~ (v0.6), ~~keyboard driver + shell~~ (v0.7)
 6. ~~Physical memory manager~~ (v0.9)
-7. Paging — W^X and NX from the first page table  ← **next**
+7. ~~Paging~~ (v1.0)
+8. Heap (kmalloc) on top of the frame allocator  ← **next**
+9. TSS + user mode, then long mode (brings a real NX bit)
 7. Later: TSS + user mode, 64-bit long mode (requires paging first)
 
 ## Reference

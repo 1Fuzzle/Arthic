@@ -16,17 +16,24 @@ SECTIONS
 
 	/* .text is executable code. The multiboot header is placed first, ahead
 	 * of everything, so GRUB finds it while scanning the start of the file. */
+	/* Marks around the code section, so paging can make it read-only.
+	 * The linker knows where things ended up; C cannot know without being
+	 * told, and this is how it gets told. */
+	kernel_text_start = .;
 	.text BLOCK(4K) : ALIGN(4K)
 	{
 		*(.multiboot)
 		*(.text)
 	}
+	kernel_text_end = .;
 
 	/* Read-only data: string literals, const values. */
 	.rodata BLOCK(4K) : ALIGN(4K)
 	{
 		*(.rodata)
+		*(.rodata.*)
 	}
+	kernel_rodata_end = .;
 
 	/* Initialised writable data. */
 	.data BLOCK(4K) : ALIGN(4K)

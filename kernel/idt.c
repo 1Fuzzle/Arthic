@@ -32,6 +32,7 @@ static struct idt_ptr   idt_pointer;
 /* Registered handlers for the 16 hardware IRQs. NULL means "nobody cares
  * about this one yet", which is fine — we still have to acknowledge it. */
 static irq_handler_t irq_handlers[16];
+static irq_handler_t isr_handlers[32];
 
 /* From interrupts.s. `extern` means "this exists, defined elsewhere". */
 extern void idt_flush(uint32_t);
@@ -134,6 +135,12 @@ void irq_unmask(uint8_t irq)
 	outb(port, (uint8_t)(inb(port) & ~(1 << irq)));
 }
 
+void isr_install_handler(int exception, irq_handler_t handler)
+{
+	if (exception < 0 || exception > 31) return;
+	isr_handlers[exception] = handler;
+}
+
 void irq_install_handler(int irq, irq_handler_t handler)
 {
 	if (irq < 0 || irq > 15) return;
@@ -155,6 +162,13 @@ void irq_install_handler(int irq, irq_handler_t handler)
  */
 void isr_handler(struct registers *regs)
 {
+	/* A registered handler gets first refusal. Page faults are handled and
+	 * resumed in a real system; only unclaimed exceptions are fatal. */
+	if (regs->int_no < 32 && isr_handlers[regs->int_no]) {
+		isr_handlers[regs->int_no](regs);
+		return;
+	}
+
 	const char *name = (regs->int_no < 32)
 		? exception_names[regs->int_no] : "Unknown";
 
@@ -195,6 +209,9 @@ void idt_install(void)
 
 	for (int i = 0; i < 16; i++)
 		irq_handlers[i] = 0;
+
+	for (int i = 0; i < 32; i++)
+		isr_handlers[i] = 0;
 
 	pic_remap();
 

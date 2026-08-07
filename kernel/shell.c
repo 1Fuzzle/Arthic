@@ -15,6 +15,7 @@
 #include "timer.h"
 #include "string.h"
 #include "pmm.h"
+#include "paging.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -38,14 +39,15 @@ static void command_help(void)
 	kprintf("  echo <text>   print text back\n");
 	kprintf("  mem           physical memory usage\n");
 	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
+	kprintf("  wptest        try to write to kernel code (should page fault)\n");
 	kprintf("  clear         clear the screen\n");
 }
 
 static void command_about(void)
 {
-	kprintf("Arthic v0.9 — a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.0 — a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Physical memory manager. No paging or filesystem yet.\n");
+	kprintf("Physical memory manager and paging. No filesystem yet.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -72,6 +74,25 @@ static void command_alloc(void)
 		kprintf("out of memory\n");
 }
 
+/* Deliberately write to the kernel's own code, which paging_init marked
+ * read-only. If protection works this page-faults and halts; if it silently
+ * succeeds, something is wrong — most likely CR0.WP is not set.
+ *
+ * A test that halts the machine is a blunt instrument, but "did the hardware
+ * actually stop me" is not a question you can answer any other way. */
+static void command_wptest(void)
+{
+	extern uint32_t kernel_text_start;
+	volatile uint32_t *code = (volatile uint32_t *) &kernel_text_start;
+
+	kprintf("writing to kernel code at 0x%x ...\n", (uint32_t) code);
+	kprintf("expect a page fault. if you see 'survived', protection failed.\n");
+
+	*code = 0xDEADBEEF;
+
+	kprintf("survived — WRITE PROTECTION IS NOT WORKING\n");
+}
+
 static void command_ticks(void)
 {
 	uint32_t t = timer_get_ticks();
@@ -95,6 +116,8 @@ static void execute(const char *line)
 		command_mem();
 	else if (kstrcmp(line, "alloc") == 0)
 		command_alloc();
+	else if (kstrcmp(line, "wptest") == 0)
+		command_wptest();
 	else if (kstrcmp(line, "clear") == 0)
 		terminal_clear();
 	else if (kstrcmp(line, "echo") == 0)

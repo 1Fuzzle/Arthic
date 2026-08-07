@@ -31,6 +31,11 @@ struct registers {
 typedef void (*irq_handler_t)(struct registers *regs);
 
 void idt_install(void);
+
+/* Install a handler for one CPU exception (0-31). Without this, every
+ * exception goes to the default handler, which prints and halts. Page faults
+ * need something better than that. */
+void isr_install_handler(int exception, irq_handler_t handler);
 void irq_install_handler(int irq, irq_handler_t handler);
 
 #endif

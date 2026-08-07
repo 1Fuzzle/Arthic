@@ -14,6 +14,7 @@
 #include "keyboard.h"
 #include "shell.h"
 #include "pmm.h"
+#include "paging.h"
 #include "multiboot.h"
 
 /* ---- Entry point ----------------------------------------------------------
@@ -30,7 +31,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v0.9\n");
+	terminal_write("Arthic kernel v1.0\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -60,12 +61,15 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	}
 
 	pmm_init(mbi);
+	paging_init();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
 	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
 	kprintf("PMM  installed: %u KB usable, %u KB in use.\n",
 	        pmm_free_frames() * 4, pmm_used_frames() * 4);
+	kprintf("Paging enabled: %u MB identity-mapped, kernel code read-only.\n",
+	        paging_identity_limit() / (1024 * 1024));
 	kprintf("kprintf is alive.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
@@ -78,7 +82,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	kprintf("  string       %s\n", "Arthic");
 	kprintf("  character    %c\n", 'A');
 	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v0.%d at 0x%x\n", "kernel", 9, 0xB8000u);
+	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 0, 0xB8000u);
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("\nInterrupts enabled. Keyboard live. Type 'help'.\n\n");

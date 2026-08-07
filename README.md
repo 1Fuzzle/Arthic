@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state — v0.9
+## Current state — v1.0
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -13,9 +13,19 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - PIT timer driving a tick counter
 - PS/2 keyboard driver with Shift and Caps Lock
 - Physical memory manager: bitmap frame allocator driven by the BIOS memory map
-- A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `echo <text>`, `clear`
+- Paging: 8 MB identity-mapped, kernel code and rodata read-only, CR0.WP set,
+  all kernel pages supervisor-only, page fault handler reporting CR2
+- A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `wptest`, `echo`, `clear`
 
-No paging, no filesystem, no user mode yet.
+No heap, no filesystem, no user mode yet.
+
+### On W^X — a known gap
+
+Plain 32-bit paging has **no no-execute bit**. Any readable page is executable.
+Real W^X needs PAE or 64-bit long mode, where the entry format is wide enough
+to carry an NX bit. What is enforced today is the write half: kernel code
+cannot be modified, and CR0.WP makes that apply to ring 0 too. Completing W^X
+is a reason to move to long mode.
 
 ## Building and running
 
@@ -59,7 +69,8 @@ Arthic/
 │   ├── keyboard.c    PS/2 scancodes to characters
 │   └── timer.c       PIT tick counter
 ├── mm/
-│   └── pmm.c         physical frame allocator (bitmap)
+│   ├── pmm.c         physical frame allocator (bitmap)
+│   └── paging.c      page directory and tables, MMU setup, page fault handler
 ├── lib/
 │   └── string.c      kmemset, kmemcpy, kstrcmp — no libc exists
 ├── include/          every header
@@ -116,10 +127,10 @@ Should be `0`.
 4. ~~GDT~~ (v0.5)
 5. ~~IDT, PIC remap, timer~~ (v0.6) and ~~keyboard, shell~~ (v0.7)
 6. ~~Physical memory manager~~ (v0.9)
-7. **Next:** paging — with W^X and NX from the first page table, not
-   retrofitted
-8. Later: a heap (kmalloc) on top of the frame allocator
-9. Later: TSS and user mode, then 64-bit long mode (requires paging first)
+7. ~~Paging~~ (v1.0) — write protection done; NX blocked until PAE or long mode
+8. **Next:** a heap (kmalloc) on top of the frame allocator
+9. Later: TSS and user mode
+10. Later: 64-bit long mode — and with it, a real NX bit
 
 ## Reference
 
