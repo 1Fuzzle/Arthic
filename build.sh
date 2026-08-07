@@ -3,44 +3,66 @@
 #
 # Usage:  ./build.sh          build only
 #         ./build.sh run      build, then boot it in QEMU
+#         ./build.sh clean    delete build products
 #
-# On Arch you need:  sudo pacman -S base-devel qemu-system-x86 grub xorriso
+# On Arch you need:  sudo pacman -S base-devel qemu-system-x86 qemu-ui-gtk
 #
-# Note on compiler flags — these are what make this "freestanding":
-#   -m32           build 32-bit code (the CPU is in 32-bit mode at boot)
-#   -ffreestanding do not assume a standard library exists
-#   -nostdlib      do not link the standard library or C startup files
-#   -fno-builtin   do not silently swap our code for library calls
-#   -Wall -Wextra  turn on warnings; in kernel code, listen to all of them
+# Object files go in build/ rather than sitting next to the source. Keeps the
+# tree clean and makes "delete everything generated" a one-liner.
 
 set -e
 
-CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fno-builtin -fno-stack-protector \
-        -fno-pie -nostdlib -Wall -Wextra -O2"
+BUILD=build
+INCLUDE=include
 
-echo "assembling boot.s ..."
-gcc -m32 -c boot.s -o boot.o
+# Compiler flags — these are what make this a kernel rather than a program:
+#   -m32                      32-bit; the CPU is in 32-bit mode after GRUB
+#   -ffreestanding            do not assume a standard library exists
+#   -nostdlib                 do not link libc or the C startup files
+#   -fno-builtin              do not silently swap our code for library calls
+#   -mno-mmx -mno-sse ...     REQUIRED. Without these gcc vectorises loops into
+#                             SSE instructions, which the CPU refuses to run
+#                             before SSE is enabled in CR4 — triple fault.
+#   -fno-stack-protector      needs __stack_chk_fail, which we have not written
+#   -I$INCLUDE                where our headers live
+#   -Wall -Wextra             warnings in kernel code are usually real bugs
+CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
+        -fno-builtin -fno-stack-protector -fno-pie -nostdlib \
+        -I$INCLUDE -Wall -Wextra -O2"
 
-echo "assembling interrupts.s ..."
-gcc -m32 -c interrupts.s -o interrupts.o
+ASFLAGS="-m32"
 
-echo "compiling kernel.c ..."
-gcc $CFLAGS -c kernel.c -o kernel.o
+if [ "$1" = "clean" ]; then
+	rm -rf "$BUILD" arthic.bin
+	echo "cleaned"
+	exit 0
+fi
 
-echo "compiling gdt.c ..."
-gcc $CFLAGS -c gdt.c -o gdt.o
+mkdir -p "$BUILD"
 
-echo "compiling idt.c ..."
-gcc $CFLAGS -c idt.c -o idt.o
+# Assembly sources
+for src in boot/boot.s kernel/interrupts.s; do
+	obj="$BUILD/$(basename "$src" .s).o"
+	echo "assembling $src"
+	gcc $ASFLAGS -c "$src" -o "$obj"
+done
 
-echo "linking arthic.bin ..."
-gcc -m32 -no-pie -Wl,--build-id=none -T linker.ld -o arthic.bin -ffreestanding -nostdlib -O2 \
-    boot.o kernel.o gdt.o idt.o interrupts.o
+# C sources
+for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c \
+           drivers/terminal.c drivers/keyboard.c drivers/timer.c; do
+	obj="$BUILD/$(basename "$src" .c).o"
+	echo "compiling  $src"
+	gcc $CFLAGS -c "$src" -o "$obj"
+done
+
+echo "linking    arthic.bin"
+gcc -m32 -no-pie -Wl,--build-id=none -T linker.ld -o arthic.bin \
+    -ffreestanding -nostdlib -O2 "$BUILD"/*.o
 
 echo
 echo "built: arthic.bin"
 
 if [ "$1" = "run" ]; then
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
-	qemu-system-i386 -kernel arthic.bin
+	qemu-system-i386 -no-reboot -kernel arthic.bin
 fi

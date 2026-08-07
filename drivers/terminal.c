@@ -1,13 +1,20 @@
-/* kernel.c — Arthic
+/* terminal.c — VGA text output.
  *
- * This is freestanding C. That word matters: normally C programs sit on top of
- * an operating system that provides printf, malloc, files, and so on. Here we
- * ARE the operating system, so none of that exists. There is no stdio.h. If we
- * want to put a character on the screen, we have to write to the hardware
- * ourselves.
+ * The screen is memory. Address 0xB8000 holds an 80x25 grid of two-byte cells:
+ * one byte character, one byte colour. Write there and characters appear. That
+ * is the entire mechanism.
  *
- * What we get instead is: the C language itself, and raw memory.
+ * Also here: the hardware cursor, which the VGA controller draws for us once we
+ * tell it where to sit over I/O ports; and kprintf, because printing a number
+ * means printing characters, and this is where characters live.
  */
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdarg.h>
+
+#include "terminal.h"
+#include "io.h"
 
 /* ---- Types ----------------------------------------------------------------
  * stdint.h and stddef.h are two of the very few headers that are safe here,
@@ -28,6 +35,9 @@
 #include "idt.h"
 #include "io.h"        /* outb / inb now live here, shared with idt.c */
 #include "terminal.h"
+#include "keyboard.h"
+#include "shell.h"
+#include "timer.h"
 
 /* ---- The screen -----------------------------------------------------------
  * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
@@ -42,22 +52,13 @@
 static const size_t VGA_WIDTH  = 80;
 static const size_t VGA_HEIGHT = 25;
 
-/* VGA's 16 available colours, in the order the hardware numbers them. */
-enum vga_colour {
-	VGA_BLACK = 0,  VGA_BLUE = 1,       VGA_GREEN = 2,       VGA_CYAN = 3,
-	VGA_RED = 4,    VGA_MAGENTA = 5,    VGA_BROWN = 6,       VGA_LIGHT_GREY = 7,
-	VGA_DARK_GREY = 8, VGA_LIGHT_BLUE = 9, VGA_LIGHT_GREEN = 10, VGA_LIGHT_CYAN = 11,
-	VGA_LIGHT_RED = 12, VGA_PINK = 13,  VGA_YELLOW = 14,     VGA_WHITE = 15,
-};
-
 /* Pack a foreground and background colour into the single byte VGA wants.
  *
- * `bg << 4` shifts the background colour left by 4 bits, moving it into the
- * upper half of the byte. Then `|` merges the two halves together. Bit
- * shifting like this is everywhere in systems code — hardware packs several
- * fields into one byte and you assemble them by hand.
+ * `bg << 4` shifts the background colour into the upper half of the byte, then
+ * `|` merges the two halves. Hardware packs several fields into one byte and
+ * you assemble them by hand.
  */
-static uint8_t vga_entry_colour(enum vga_colour fg, enum vga_colour bg) {
+uint8_t vga_entry_colour(enum vga_colour fg, enum vga_colour bg) {
 	return fg | (bg << 4);
 }
 
@@ -163,6 +164,32 @@ static void terminal_put_at(char ch, uint8_t colour, size_t x, size_t y) {
 	terminal_buffer[y * VGA_WIDTH + x] = vga_entry(ch, colour);
 }
 
+
+/* Blank the screen and put the cursor back at the top. Same loop as
+ * terminal_initialise, without re-initialising the hardware cursor. */
+void terminal_clear(void) {
+	for (size_t y = 0; y < VGA_HEIGHT; y++)
+		for (size_t x = 0; x < VGA_WIDTH; x++)
+			terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_colour);
+
+	terminal_row = 0;
+	terminal_column = 0;
+	terminal_move_cursor(0, 0);
+}
+
+/* Erase the character before the cursor.
+ *
+ * Note this only steps back within the current row. Backing up over a line
+ * wrap would mean remembering how long the previous line was, which the
+ * terminal does not track. The shell also refuses to backspace past the start
+ * of its buffer, so in practice you cannot reach the edge. */
+void terminal_backspace(void) {
+	if (terminal_column > 0) {
+		terminal_column--;
+		terminal_put_at(' ', terminal_colour, terminal_column, terminal_row);
+		terminal_move_cursor(terminal_column, terminal_row);
+	}
+}
 
 /* Move everything on screen up by one row, and blank the bottom row.
  *
@@ -372,99 +399,3 @@ void kprintf(const char *fmt, ...) {
 	va_end(args);
 }
 
-/* ---- Timer ----------------------------------------------------------------
- * IRQ 0 fires roughly 18.2 times a second by default. This handler does the
- * simplest possible useful thing: count, and say something once a second.
- *
- * `volatile` on the counter tells the compiler this variable changes outside
- * normal program flow. Without it, a loop that only reads `ticks` could be
- * optimised into reading it once and assuming it never changes — because as
- * far as the compiler can see, nothing ever writes to it. Any variable shared
- * between an interrupt handler and normal code needs this.
- */
-static volatile uint32_t ticks = 0;
-
-static void timer_handler(struct registers *regs) {
-	(void) regs;   /* unused — this silences the -Wextra warning honestly,
-	                * rather than by removing the parameter we may want later */
-	ticks++;
-
-	if (ticks % 18 == 0)
-		kprintf("tick %u  (about %u seconds since boot)\n",
-		        ticks, ticks / 18);
-}
-
-/* ---- Entry point ----------------------------------------------------------
- * boot.s calls this. Note it never returns — an OS kernel has nothing to
- * return to.
- */
-void kernel_main(void) {
-	terminal_initialise();
-
-	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
-	terminal_write("  _   _   _   _   _   _\n");
-	terminal_write(" / \\ / \\ / \\ / \\ / \\ / \\\n");
-	terminal_write("( A | r | t | h | i | c )\n");
-	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
-
-	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v0.6\n");
-	terminal_write("Booted in 32-bit protected mode.\n\n");
-
-	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
-	terminal_write("No scheduler. No memory manager. No drivers.\n");
-	terminal_write("Just this. Everything else is yours to add.\n\n");
-
-	/* Print enough lines to push the banner off the top, proving the scroll
-	 * works.
-	 *
-	 * Note `char line[]` and not `const char *line`. That difference is real:
-	 * a char array is our own writable COPY of those bytes, so line[5] = c
-	 * edits it. Declared as a pointer it would point at read-only memory and
-	 * writing through it would be undefined behaviour. Same-looking text,
-	 * completely different thing.                                          */
-	/* Replace GRUB's borrowed descriptor table with our own before doing
-	 * anything else. Nothing visible happens — that is the point. */
-	gdt_install();
-	idt_install();
-
-	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
-	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
-	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
-	kprintf("kprintf is alive.\n\n");
-
-	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	kprintf("  decimal      %d\n", 1234);
-	kprintf("  negative     %d\n", -4321);
-	kprintf("  zero         %d\n", 0);
-	kprintf("  int minimum  %d\n", (int32_t) 0x80000000);
-	kprintf("  unsigned     %u\n", 4294967295u);
-	kprintf("  hex          0x%x\n", 0xDEADBEEFu);
-	kprintf("  string       %s\n", "Arthic");
-	kprintf("  character    %c\n", 'A');
-	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v0.%d at 0x%x\n", "kernel", 6, 0xB8000u);
-
-	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
-	kprintf("\nInterrupts enabled. The timer is now driving this system.\n\n");
-
-	irq_install_handler(0, timer_handler);
-
-	/* Want to see the exception handler work? Uncomment this. It divides by
-	 * zero on purpose, which raises exception 0 and halts with a register
-	 * dump. Comment it out again afterwards — it is fatal by design. */
-	/* { volatile int a = 1, b = 0; kprintf("%d", a / b); } */
-
-	/* sti — set interrupt flag. Until this instruction the CPU has been
-	 * ignoring all hardware interrupts. This is the moment Arthic stops
-	 * being a program that runs top to bottom and becomes a system that
-	 * responds to the outside world. */
-	__asm__ volatile ("sti");
-
-	/* Idle forever. hlt stops the CPU until the next interrupt arrives,
-	 * which is why this loop uses no power — unlike a bare while(1), which
-	 * would spin a core at 100% doing nothing. */
-	for (;;)
-		__asm__ volatile ("hlt");
-
-}
