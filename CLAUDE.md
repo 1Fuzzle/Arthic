@@ -44,11 +44,14 @@ kernel/shell.c       line buffer, command dispatch
 drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter
+mm/pmm.c             physical frame allocator, bitmap, driven by multiboot mmap
+lib/string.c         kmemset, kmemcpy, kstrcmp, kstartswith
 include/             all headers
 ```
 
 New code goes in `kernel/` if it is OS machinery, `drivers/` if it talks to
-specific hardware. Headers always in `include/`. `main.c` stays small — if it
+specific hardware, `mm/` for memory management, `lib/` for functions that would
+have come from libc. Headers always in `include/`. `main.c` stays small — if it
 grows, the new thing wants its own file.
 
 ## Constraints to respect
@@ -68,7 +71,8 @@ grows, the new thing wants its own file.
 3. ~~Our own `printf`~~ done (v0.4) — `%d %u %x %s %c`, no width specifiers yet
 4. ~~GDT~~ done (v0.5) — no TSS
 5. ~~IDT, PIC remap, timer~~ (v0.6), ~~keyboard driver + shell~~ (v0.7)
-6. Physical memory manager, then paging (W^X from the start)  ← **next**
+6. ~~Physical memory manager~~ (v0.9)
+7. Paging — W^X and NX from the first page table  ← **next**
 7. Later: TSS + user mode, 64-bit long mode (requires paging first)
 
 ## Reference

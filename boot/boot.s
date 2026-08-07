@@ -51,7 +51,17 @@ _start:
 
 	mov $stack_top, %esp   /* esp = the stack pointer. C now works.          */
 
-	call kernel_main       /* jump into kernel.c — the last assembly we do   */
+	/* GRUB left two things in registers for us before jumping here:
+	 *   eax = a magic number confirming we were loaded by a multiboot loader
+	 *   ebx = the address of a structure describing the machine, including
+	 *         the memory map we need to know how much RAM exists
+	 *
+	 * Nothing preserves those registers for us, so push them now as
+	 * arguments. C reads arguments off the stack, last one pushed first. */
+	push %ebx              /* second argument */
+	push %eax              /* first argument  */
+
+	call kernel_main       /* into main.c — the last assembly we do */
 
 	/* kernel_main should never return, but if it somehow does, park the CPU
 	 * forever rather than letting it wander into whatever bytes come next.  */

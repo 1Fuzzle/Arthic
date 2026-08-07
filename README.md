@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state — v0.7
+## Current state — v0.9
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -12,9 +12,10 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - Own IDT: 32 CPU exception handlers, 16 IRQs, PIC remapped to vectors 32-47
 - PIT timer driving a tick counter
 - PS/2 keyboard driver with Shift and Caps Lock
-- A shell: `help`, `about`, `ticks`, `echo <text>`, `clear`
+- Physical memory manager: bitmap frame allocator driven by the BIOS memory map
+- A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `echo <text>`, `clear`
 
-No memory manager, no paging, no filesystem, no user mode yet.
+No paging, no filesystem, no user mode yet.
 
 ## Building and running
 
@@ -57,6 +58,10 @@ Arthic/
 │   ├── terminal.c    VGA text output, scrolling, cursor, kprintf
 │   ├── keyboard.c    PS/2 scancodes to characters
 │   └── timer.c       PIT tick counter
+├── mm/
+│   └── pmm.c         physical frame allocator (bitmap)
+├── lib/
+│   └── string.c      kmemset, kmemcpy, kstrcmp — no libc exists
 ├── include/          every header
 └── build/            object files (generated, git-ignored)
 ```
@@ -110,9 +115,11 @@ Should be `0`.
 3. ~~`kprintf`~~ (v0.4)
 4. ~~GDT~~ (v0.5)
 5. ~~IDT, PIC remap, timer~~ (v0.6) and ~~keyboard, shell~~ (v0.7)
-6. **Next:** physical memory manager, then paging — with W^X and NX from the
-   first page table, not retrofitted
-7. Later: TSS and user mode, then 64-bit long mode (requires paging first)
+6. ~~Physical memory manager~~ (v0.9)
+7. **Next:** paging — with W^X and NX from the first page table, not
+   retrofitted
+8. Later: a heap (kmalloc) on top of the frame allocator
+9. Later: TSS and user mode, then 64-bit long mode (requires paging first)
 
 ## Reference
 

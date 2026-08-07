@@ -42,6 +42,12 @@ SECTIONS
 		*(.bss)
 	}
 
+	/* The address just past the end of the kernel. The memory manager needs
+	 * to know where it is safe to start putting things — everything below
+	 * this is us, and overwriting ourselves would be a short trip. The
+	 * linker fills this in; C reads it via `extern`. */
+	kernel_end = .;
+
 	/* Metadata the toolchain adds that a kernel has no use for. If we do not
 	 * discard it, the linker may place it BEFORE our multiboot header, and
 	 * GRUB only scans the first 8 KiB of the file. */

@@ -13,6 +13,8 @@
 #include "shell.h"
 #include "terminal.h"
 #include "timer.h"
+#include "string.h"
+#include "pmm.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,34 +22,6 @@
 
 static char   buffer[SHELL_BUFFER_SIZE];
 static size_t buffer_length = 0;
-
-/* ---- Our own string functions ---------------------------------------------
- * No string.h. If we want to compare strings we write it.
- *
- * Both of these walk two pointers forward in step. kstrcmp returns 0 for
- * equal, which matches the convention of the real strcmp — worth keeping even
- * though it reads backwards, because every C programmer expects it.
- */
-static int kstrcmp(const char *a, const char *b)
-{
-	while (*a && (*a == *b)) {
-		a++;
-		b++;
-	}
-	return (int)((unsigned char)*a) - (int)((unsigned char)*b);
-}
-
-/* Does `str` begin with `prefix`? Used to spot "echo " followed by anything. */
-static int kstartswith(const char *str, const char *prefix)
-{
-	while (*prefix) {
-		if (*str != *prefix)
-			return 0;
-		str++;
-		prefix++;
-	}
-	return 1;
-}
 
 static void prompt(void)
 {
@@ -62,14 +36,40 @@ static void command_help(void)
 	kprintf("  about         what Arthic is\n");
 	kprintf("  ticks         milliseconds-ish since boot, from the timer\n");
 	kprintf("  echo <text>   print text back\n");
+	kprintf("  mem           physical memory usage\n");
+	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
 	kprintf("  clear         clear the screen\n");
 }
 
 static void command_about(void)
 {
-	kprintf("Arthic v0.7 — a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v0.9 — a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("No memory manager and no filesystem. Yet.\n");
+	kprintf("Physical memory manager. No paging or filesystem yet.\n");
+}
+
+/* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
+static void command_mem(void)
+{
+	uint32_t total = pmm_total_frames();
+	uint32_t used  = pmm_used_frames();
+	uint32_t free  = pmm_free_frames();
+
+	kprintf("  total  %u frames  (%u KB)\n", total, total * 4);
+	kprintf("  used   %u frames  (%u KB)\n", used,  used  * 4);
+	kprintf("  free   %u frames  (%u KB)\n", free,  free  * 4);
+}
+
+/* Take a frame from the allocator and report where it landed. Run it twice and
+ * you should get two different addresses — proof the bitmap is being updated
+ * rather than handing out the same page forever. */
+static void command_alloc(void)
+{
+	uint32_t addr = pmm_alloc_frame();
+	if (addr)
+		kprintf("allocated frame at physical 0x%x\n", addr);
+	else
+		kprintf("out of memory\n");
 }
 
 static void command_ticks(void)
@@ -91,6 +91,10 @@ static void execute(const char *line)
 		command_about();
 	else if (kstrcmp(line, "ticks") == 0)
 		command_ticks();
+	else if (kstrcmp(line, "mem") == 0)
+		command_mem();
+	else if (kstrcmp(line, "alloc") == 0)
+		command_alloc();
 	else if (kstrcmp(line, "clear") == 0)
 		terminal_clear();
 	else if (kstrcmp(line, "echo") == 0)

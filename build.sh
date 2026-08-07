@@ -49,7 +49,8 @@ done
 
 # C sources
 for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c \
-           drivers/terminal.c drivers/keyboard.c drivers/timer.c; do
+           drivers/terminal.c drivers/keyboard.c drivers/timer.c \
+           mm/pmm.c lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
 	echo "compiling  $src"
 	gcc $CFLAGS -c "$src" -o "$obj"
@@ -64,5 +65,5 @@ echo "built: arthic.bin"
 
 if [ "$1" = "run" ]; then
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
-	qemu-system-i386 -no-reboot -kernel arthic.bin
+	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin
 fi
