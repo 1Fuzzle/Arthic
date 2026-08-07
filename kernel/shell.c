@@ -53,7 +53,7 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.3 - a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.4 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
 	kprintf("Paging, heap, ring 3 with syscalls, preemptive scheduler.\n");
 }
@@ -168,13 +168,11 @@ static void demo_thread(void)
 	uint32_t id = me ? me->id : 0;
 
 	for (int i = 1; i <= 5; i++) {
-		uint32_t target = timer_get_ticks() + 18;
-
-		/* Busy-wait, yielding rather than spinning. With no sleep queue yet
-		 * this is the honest version: the thread stays runnable and simply
-		 * hands the CPU on each time round. */
-		while (timer_get_ticks() < target)
-			task_yield();
+		/* Sleep rather than spin. The thread is skipped entirely by the
+		 * scheduler until it is due, so waiting now costs nothing at all -
+		 * unlike yielding in a loop, which stays runnable and burns a slice
+		 * every time round. */
+		task_sleep(18);
 
 		kprintf("[task %u] %u of 5\n", id, (uint32_t) i);
 	}

@@ -32,6 +32,7 @@
 #include "kheap.h"
 #include "string.h"
 #include "terminal.h"
+#include "timer.h"
 
 #define STACK_FRAMES 2   /* 8 KB per thread */
 
@@ -41,6 +42,7 @@ static struct task *current  = 0;
 static struct task *task_ring = 0;   /* circular list */
 static uint32_t     next_id  = 0;
 static int          enabled  = 0;
+static uint32_t     switches = 0;
 
 static void copy_name(char *dest, const char *src)
 {
@@ -135,38 +137,92 @@ static void reap(struct task *prev, struct task *dead)
 	kfree(dead);
 }
 
+/* Move any sleeper whose time has come back to READY.
+ *
+ * A linear pass over every task on every tick. With thousands of tasks you
+ * would keep them in a queue ordered by wake time and look at only the head;
+ * with a handful, walking the ring is faster than maintaining the queue. Worth
+ * knowing which one you are choosing and why. */
+static void wake_sleepers(void)
+{
+	uint32_t now = timer_get_ticks();
+	struct task *t = task_ring;
+	uint32_t guard = 0;
+
+	do {
+		if (t->state == TASK_SLEEPING && now >= t->wake_tick)
+			t->state = TASK_READY;
+		t = t->next;
+	} while (t != task_ring && guard++ < 64);
+}
+
 void task_schedule(void)
 {
 	if (!enabled || !current)
 		return;
 
-	struct task *prev = current;
-	struct task *next = current->next;
+	/* Interrupts off across the switch. This function is reached both from
+	 * the timer interrupt (where they are already off) and from a thread
+	 * calling sleep or yield (where they are on), and a timer tick landing
+	 * halfway through would try to schedule inside scheduling.
+	 *
+	 * `flags` is a local, so it lives on this thread's stack and is still
+	 * correct whenever this thread is resumed - possibly much later. */
+	uint32_t flags;
+	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
 
-	/* Walk forward for a runnable task, cleaning up dead ones on the way.
-	 * Bounded by the ring length so a ring of nothing but corpses cannot spin
-	 * forever. */
+	wake_sleepers();
+
+	struct task *prev = current;
+
+	/* Walk the ring for something runnable, reaping corpses on the way. */
+	struct task *scan = current;
+	struct task *next = 0;
 	uint32_t guard = 0;
-	while (next != current && guard++ < 64) {
-		if (next->state == TASK_FINISHED) {
-			struct task *dead = next;
-			next = next->next;
-			reap(prev, dead);
+
+	while (guard++ < 64) {
+		struct task *candidate = scan->next;
+
+		if (candidate == current)
+			break;                     /* full lap, nothing else ready */
+
+		if (candidate->state == TASK_FINISHED) {
+			reap(scan, candidate);     /* scan->next now points past it */
 			continue;
 		}
-		break;
+
+		if (candidate->state == TASK_READY) {
+			next = candidate;
+			break;
+		}
+
+		scan = candidate;              /* sleeping - skip it entirely */
 	}
 
-	if (next == current || !next)
-		return;                       /* nothing else to run */
+	if (!next) {
+		/* Nothing else can run. If we are still runnable, carry on. If not -
+		 * we just went to sleep - fall back to task 0, which never sleeps and
+		 * spends its time halted. That is the idle task in all but name. */
+		if (current->state == TASK_RUNNING) {
+			if (flags & 0x200)
+				__asm__ volatile ("sti");
+			return;
+		}
+		next = task_ring;
+	}
 
 	if (current->state == TASK_RUNNING)
 		current->state = TASK_READY;
 
 	next->state = TASK_RUNNING;
 	current     = next;
+	switches++;
 
 	task_switch(&prev->esp, next->esp);
+
+	/* Resumed. Restore the interrupt state this thread had when it left. */
+	if (flags & 0x200)
+		__asm__ volatile ("sti");
 
 	/* Execution resumes here when something switches back to `prev`. Note
 	 * that by then `current` points at a different task — the local variables
@@ -178,6 +234,28 @@ void task_schedule(void)
 void task_yield(void)
 {
 	task_schedule();
+}
+
+void task_sleep(uint32_t ticks)
+{
+	if (!enabled || !current || current == task_ring) {
+		/* Task 0 must never sleep - it is the fallback when nothing else can
+		 * run. Busy-wait instead. */
+		uint32_t target = timer_get_ticks() + ticks;
+		while (timer_get_ticks() < target)
+			__asm__ volatile ("hlt");
+		return;
+	}
+
+	current->wake_tick = timer_get_ticks() + ticks;
+	current->state     = TASK_SLEEPING;
+
+	task_schedule();
+}
+
+uint32_t task_switch_count(void)
+{
+	return switches;
 }
 
 void task_exit(void)
@@ -201,15 +279,16 @@ void task_list(void)
 	struct task *t = task_ring;
 	uint32_t guard = 0;
 
-	kprintf("  id  state    name\n");
+	kprintf("  %u context switches so far\n", switches);
+	kprintf("  id  state     name\n");
 
 	do {
-		const char *state = t->state == TASK_RUNNING  ? "running"
-		                  : t->state == TASK_READY    ? "ready"
+		const char *state = t->state == TASK_RUNNING  ? "running "
+		                  : t->state == TASK_READY    ? "ready   "
+		                  : t->state == TASK_SLEEPING ? "sleeping"
 		                  :                             "finished";
 
-		kprintf("  %u   %s%s  %s\n", t->id, state,
-		        t->state == TASK_READY ? "   " : " ", t->name);
+		kprintf("  %u   %s  %s\n", t->id, state, t->name);
 
 		t = t->next;
 	} while (t != task_ring && guard++ < 32);

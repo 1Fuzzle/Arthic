@@ -20,6 +20,7 @@
 enum task_state {
 	TASK_READY,
 	TASK_RUNNING,
+	TASK_SLEEPING,   /* not runnable until wake_tick */
 	TASK_FINISHED
 };
 
@@ -34,6 +35,7 @@ struct task {
 	enum task_state state;
 	uint32_t     stack_base;
 	uint32_t     stack_frames;
+	uint32_t     wake_tick;      /* meaningful only while TASK_SLEEPING */
 	struct task *next;
 };
 
@@ -53,6 +55,15 @@ void task_exit(void);
 
 /* Give up the rest of this time slice voluntarily. */
 void task_yield(void);
+
+/* Stop running for at least `ticks` timer ticks. The difference from yielding
+ * in a loop is that a sleeping task is not considered for scheduling at all -
+ * it costs nothing until it is due. */
+void task_sleep(uint32_t ticks);
+
+/* How many context switches have happened. Cheap way to see the scheduler
+ * doing work. */
+uint32_t task_switch_count(void);
 
 void         task_list(void);
 struct task *task_current(void);

@@ -44,7 +44,7 @@ kernel/shell.c       line buffer, command dispatch
 kernel/tss.c         TSS - kernel stack for ring 3 entry, I/O bitmap denies port access
 kernel/syscall.c     int 0x80 dispatch, user pointer validation
 kernel/usermode.c    ring 3 entry/exit, demo user program in .usertext
-kernel/task.c        kernel threads, round-robin scheduler, reaping
+kernel/task.c        kernel threads, round-robin scheduler, sleeping, reaping
 kernel/switch.s      context switch - callee-saved registers plus the stack pointer
 drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
