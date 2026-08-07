@@ -10,6 +10,7 @@
 #include "io.h"
 #include "terminal.h"
 #include "gdt.h"
+#include "task.h"
 
 /* One 8-byte gate descriptor. Same awkward split-field style as the GDT —
  * the handler address lives in two halves at opposite ends of the struct. */
@@ -225,6 +226,14 @@ void irq_handler(struct registers *regs)
 	if (irq >= 8)
 		outb(PIC2_COMMAND, PIC_EOI);
 	outb(PIC1_COMMAND, PIC_EOI);
+
+	/* The timer drives preemption, and this MUST come after the EOI above.
+	 * task_schedule may not return for a long time - the CPU goes off and
+	 * runs another thread. If the controller has not been acknowledged by
+	 * then, it waits forever for an acknowledgement stuck behind whatever
+	 * that thread is doing, and no timer interrupt fires again. */
+	if (irq == 0)
+		task_schedule();
 }
 
 void idt_install(void)

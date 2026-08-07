@@ -18,6 +18,7 @@
 #include "paging.h"
 #include "kheap.h"
 #include "usermode.h"
+#include "task.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -43,6 +44,8 @@ static void command_help(void)
 	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
+	kprintf("  tasks         list threads\n");
+	kprintf("  spawn         start a thread that counts to five\n");
 	kprintf("  user          drop to ring 3 and run a user program\n");
 	kprintf("  wptest        try to write to kernel code (should be blocked)\n");
 	kprintf("  clear         clear the screen\n");
@@ -50,9 +53,9 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.2 - a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.3 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Frame allocator, paging, heap, and ring 3 with syscalls.\n");
+	kprintf("Paging, heap, ring 3 with syscalls, preemptive scheduler.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -156,6 +159,37 @@ static void command_heaptest(void)
 	kprintf("all freed\n");
 }
 
+/* A demo thread. Counts to five, a second apart, then returns - and returning
+ * lands it in task_exit because that address was planted below the entry point
+ * on its stack. */
+static void demo_thread(void)
+{
+	struct task *me = task_current();
+	uint32_t id = me ? me->id : 0;
+
+	for (int i = 1; i <= 5; i++) {
+		uint32_t target = timer_get_ticks() + 18;
+
+		/* Busy-wait, yielding rather than spinning. With no sleep queue yet
+		 * this is the honest version: the thread stays runnable and simply
+		 * hands the CPU on each time round. */
+		while (timer_get_ticks() < target)
+			task_yield();
+
+		kprintf("[task %u] %u of 5\n", id, (uint32_t) i);
+	}
+}
+
+static void command_spawn(void)
+{
+	uint32_t id = task_create("demo", demo_thread);
+
+	if (id)
+		kprintf("spawned task %u - it runs alongside this shell\n", id);
+	else
+		kprintf("could not create task\n");
+}
+
 /* Drop to ring 3, run a small program, come back. */
 static void command_user(void)
 {
@@ -185,6 +219,10 @@ static void execute(const char *line)
 		command_heap();
 	else if (kstrcmp(line, "heaptest") == 0)
 		command_heaptest();
+	else if (kstrcmp(line, "tasks") == 0)
+		task_list();
+	else if (kstrcmp(line, "spawn") == 0)
+		command_spawn();
 	else if (kstrcmp(line, "user") == 0)
 		command_user();
 	else if (kstrcmp(line, "wptest") == 0)

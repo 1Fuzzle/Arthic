@@ -41,14 +41,14 @@ fi
 mkdir -p "$BUILD"
 
 # Assembly sources
-for src in boot/boot.s kernel/interrupts.s; do
+for src in boot/boot.s kernel/interrupts.s kernel/switch.s; do
 	obj="$BUILD/$(basename "$src" .s).o"
 	echo "assembling $src"
 	gcc $ASFLAGS -c "$src" -o "$obj"
 done
 
 # C sources
-for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c \
+for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            mm/pmm.c mm/paging.c mm/kheap.c lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"

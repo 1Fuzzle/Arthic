@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state — v1.2
+## Current state - v1.3
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -23,10 +23,12 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   and length-bounded before the kernel touches it
 - Recoverable page faults, so the kernel survives a bad pointer instead of
   halting - the same mechanism Linux uses for `copy_from_user`
+- Preemptive round-robin scheduler: kernel threads with their own stacks,
+  switched by the timer, with finished threads reaped and their stacks returned
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
-  `user`, `wptest`, `echo`, `clear`
+  `tasks`, `spawn`, `user`, `wptest`, `echo`, `clear`
 
-No scheduler, no filesystem yet.
+No filesystem yet.
 
 ### On W^X — a known gap
 
@@ -140,9 +142,10 @@ Should be `0`.
 7. ~~Paging~~ (v1.0) — write protection done; NX blocked until PAE or long mode
 8. ~~Heap (kmalloc)~~ (v1.1)
 9. ~~TSS and user mode~~ (v1.2) - ring 3 and a validated syscall gate
-10. **Next:** a scheduler - more than one thing running at a time
-11. Later: 64-bit long mode, and with it a real NX bit
-12. Later: a filesystem
+10. ~~Scheduler~~ (v1.3) - preemptive round robin over kernel threads
+11. **Next:** sleeping and blocking, so threads stop busy-waiting
+12. Later: 64-bit long mode, and with it a real NX bit
+13. Later: a filesystem
 
 ## Reference
 
