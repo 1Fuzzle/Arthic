@@ -33,5 +33,5 @@ echo "built: arthic.bin"
 
 if [ "$1" = "run" ]; then
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
-	qemu-system-i386 -no-reboot -kernel arthic.bin
+	qemu-system-i386 -kernel arthic.bin
 fi

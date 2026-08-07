@@ -105,6 +105,40 @@ static void terminal_put_at(char ch, uint8_t colour, size_t x, size_t y) {
 	terminal_buffer[y * VGA_WIDTH + x] = vga_entry(ch, colour);
 }
 
+
+/* Move everything on screen up by one row, and blank the bottom row.
+ *
+ * There is no memmove here. There is no memmove anywhere — we are freestanding,
+ * so if we want to move memory we write the loop ourselves.
+ *
+ * The DIRECTION of the loop matters and is the one place this can go subtly
+ * wrong. We are copying each row from the row below it, so we must start at the
+ * TOP and work down. Row 0 gets overwritten by row 1 first; by the time we read
+ * row 1 as a source we have already finished with it as a destination. Run the
+ * loop backwards instead and every row would get filled with the same content,
+ * because you would keep copying a row you had just overwritten.
+ *
+ * This "which end do I start from" question comes up constantly once regions
+ * overlap. It is exactly why the C standard has both memcpy and memmove.
+ */
+static void terminal_scroll(void) {
+	for (size_t y = 1; y < VGA_HEIGHT; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) {
+			/* destination is one row up (y-1), source is this row (y) */
+			terminal_buffer[(y - 1) * VGA_WIDTH + x] =
+				terminal_buffer[y * VGA_WIDTH + x];
+		}
+	}
+
+	/* The bottom row still holds a stale copy of what was there before, so
+	 * blank it. Using terminal_colour (not a hardcoded grey) means a blank
+	 * line inherits whatever colour is currently active. */
+	for (size_t x = 0; x < VGA_WIDTH; x++) {
+		terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + x] =
+			vga_entry(' ', terminal_colour);
+	}
+}
+
 /* Put one character at the cursor, handling newlines and wrapping ourselves.
  * Note that '\n' is not magic — on a real machine it is just the byte 10, and
  * it only means "new line" because code like this decides it does.
@@ -121,10 +155,13 @@ void terminal_putchar(char ch) {
 		}
 	}
 
-	/* We have no scrolling yet, so at the bottom we wrap to the top.
-	 * Scrolling is a good early thing to add — see the README.              */
-	if (terminal_row == VGA_HEIGHT)
-		terminal_row = 0;
+	/* Past the bottom row: scroll instead of wrapping to the top. After
+	 * scrolling, the cursor stays on the last row — that row is now blank
+	 * and is where the next character belongs.                             */
+	if (terminal_row == VGA_HEIGHT) {
+		terminal_scroll();
+		terminal_row = VGA_HEIGHT - 1;
+	}
 }
 
 /* Write a string.
@@ -159,7 +196,22 @@ void kernel_main(void) {
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
 	terminal_write("No scheduler. No memory manager. No drivers.\n");
-	terminal_write("Just this. Everything else is yours to add.\n");
+	terminal_write("Just this. Everything else is yours to add.\n\n");
+
+	/* Print enough lines to push the banner off the top, proving the scroll
+	 * works.
+	 *
+	 * Note `char line[]` and not `const char *line`. That difference is real:
+	 * a char array is our own writable COPY of those bytes, so line[5] = c
+	 * edits it. Declared as a pointer it would point at read-only memory and
+	 * writing through it would be undefined behaviour. Same-looking text,
+	 * completely different thing.                                          */
+	terminal_set_colour(vga_entry_colour(VGA_GREEN, VGA_BLACK));
+	char line[] = "line A - scrolling up, one row at a time\n";
+	for (char c = 'A'; c <= 'Z'; c++) {
+		line[5] = c;
+		terminal_write(line);
+	}
 
 	/* Fall off the end and boot.s parks the CPU. */
 }
