@@ -24,9 +24,12 @@ gcc -m32 -c boot.s -o boot.o
 echo "compiling kernel.c ..."
 gcc $CFLAGS -c kernel.c -o kernel.o
 
+echo "compiling gdt.c ..."
+gcc $CFLAGS -c gdt.c -o gdt.o
+
 echo "linking arthic.bin ..."
 gcc -m32 -no-pie -Wl,--build-id=none -T linker.ld -o arthic.bin -ffreestanding -nostdlib -O2 \
-    boot.o kernel.o
+    boot.o kernel.o gdt.o
 
 echo
 echo "built: arthic.bin"

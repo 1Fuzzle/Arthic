@@ -34,12 +34,36 @@ warning-clean — in kernel code, warnings are usually real bugs.
 
 ## Files
 
+- `gdt.c` / `gdt.h` — Global Descriptor Table. Flat model, ring 0 and ring 3
+  descriptors defined. No TSS yet.
 - `boot.s` — Multiboot header, stack setup, calls `kernel_main`. The only
   assembly in the project.
 - `kernel.c` — the kernel. VGA text output, terminal state.
 - `linker.ld` — memory layout. Multiboot header must land within the first
   8 KiB of the binary or GRUB won't recognise it.
 - `build.sh` — build script. Note the freestanding flags; they matter.
+
+## Security is a stated priority
+
+Arthic is meant to be a secure system. This is a design goal, not an
+afterthought — prefer the secure option even when it costs effort, and say so
+when a shortcut would weaken it.
+
+- **W^X.** Once paging exists, no page is ever both writable and executable.
+  Set NX on data pages. Decide this at the first page table, not later.
+- **Kernel pages are supervisor-only.** Ring 3 must not be able to read kernel
+  memory.
+- **Enable SMEP and SMAP** when we reach CR4 configuration.
+- **Fault handlers must report**, not silently halt — invisible failures cannot
+  be fixed.
+- **Validate anything crossing a privilege boundary.** A pointer from userspace
+  is hostile until proven otherwise.
+- **Bounds-check anything indexed by external input.** The realistic threat to
+  this kernel is our own C bugs, not missing features.
+- The build must stay clean under `-Wall -Wextra`. Warnings in kernel code are
+  usually real bugs.
+- `-fno-stack-protector` is currently required because `__stack_chk_fail` does
+  not exist yet. Worth writing later; do not simply drop the flag.
 
 ## Constraints to respect
 
@@ -53,12 +77,13 @@ warning-clean — in kernel code, warnings are usually real bugs.
 
 ## Roadmap
 
-1. Scrolling (shift rows up instead of wrapping to the top) — **mine to do**
-2. Hardware cursor via VGA I/O ports
-3. Our own `printf` (start with `%d` and `%s`)
-4. GDT
-5. IDT and interrupt handling → keyboard driver → shell
-6. Physical memory manager, then paging
+1. ~~Scrolling~~ done (v0.2)
+2. ~~Hardware cursor via VGA I/O ports~~ done (v0.3)
+3. ~~Our own `printf`~~ done (v0.4) — `%d %u %x %s %c`, no width specifiers yet
+4. ~~GDT~~ done (v0.5) — no TSS
+5. IDT and interrupt handling → keyboard driver → shell  ← **next**
+6. Physical memory manager, then paging (W^X from the start)
+7. Later: TSS + user mode, 64-bit long mode (requires paging first)
 
 ## Reference
 

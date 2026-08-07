@@ -24,6 +24,8 @@
 #include <stddef.h>
 #include <stdarg.h>   /* variadic arguments — also freestanding-safe */
 
+#include "gdt.h"      /* our own header — quotes, not angle brackets */
+
 /* ---- The screen -----------------------------------------------------------
  * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
  * That grid is not accessed through a function — it is just MEMORY, sitting at
@@ -412,7 +414,7 @@ void kernel_main(void) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v0.4\n");
+	terminal_write("Arthic kernel v0.5\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -427,7 +429,12 @@ void kernel_main(void) {
 	 * edits it. Declared as a pointer it would point at read-only memory and
 	 * writing through it would be undefined behaviour. Same-looking text,
 	 * completely different thing.                                          */
+	/* Replace GRUB's borrowed descriptor table with our own before doing
+	 * anything else. Nothing visible happens — that is the point. */
+	gdt_install();
+
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
+	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
 	kprintf("kprintf is alive.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
