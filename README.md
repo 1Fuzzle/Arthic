@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v1.5
+## Current state - v1.6
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -27,7 +27,10 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   switched by the timer, with finished threads reaped and their stacks returned
 - Sleeping: a task can ask to be skipped until a tick count, so waiting costs
   nothing and an idle system halts instead of spinning
-- Mutexes built on `xchg`, with a demonstration of the race they prevent
+- Mutexes built on `xchg`, with per-lock FIFO wait queues: a blocked thread is
+  not a scheduling candidate at all until the holder wakes it
+- A demonstration of the race a lock prevents, and of the lost-wakeup race that
+  naive blocking would introduce
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `user`, `wptest`, `echo`, `clear`
 
@@ -148,9 +151,9 @@ Should be `0`.
 10. ~~Scheduler~~ (v1.3) - preemptive round robin over kernel threads
 11. ~~Sleeping~~ (v1.4)
 12. ~~Mutexes~~ (v1.5)
-13. **Next:** wait queues, so a blocked thread sleeps instead of spinning
-14. Later: 64-bit long mode, and with it a real NX bit
-15. Later: a filesystem
+13. ~~Wait queues~~ (v1.6)
+14. **Next:** a filesystem - disk driver, then a format, then `ls` and `cat`
+15. Later: 64-bit long mode, and with it a real NX bit
 
 ## Reference
 

@@ -16,9 +16,18 @@
 
 #include <stdint.h>
 
+struct task;   /* forward declaration - lock.h must not depend on task.h */
+
 struct mutex {
 	volatile uint32_t locked;
 	uint32_t          contended;   /* how often someone had to wait */
+
+	/* Threads parked on this lock, oldest first. Keeping a tail pointer makes
+	 * it FIFO rather than LIFO, which matters: a stack would let a busy
+	 * thread repeatedly jump the queue and starve whoever has waited
+	 * longest. Fairness is a design decision, not an accident. */
+	struct task *wait_head;
+	struct task *wait_tail;
 };
 
 void mutex_init(struct mutex *m);

@@ -168,8 +168,7 @@ void task_schedule(void)
 	 *
 	 * `flags` is a local, so it lives on this thread's stack and is still
 	 * correct whenever this thread is resumed - possibly much later. */
-	uint32_t flags;
-	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
+	uint32_t flags = irq_save();
 
 	wake_sleepers();
 
@@ -201,11 +200,10 @@ void task_schedule(void)
 
 	if (!next) {
 		/* Nothing else can run. If we are still runnable, carry on. If not -
-		 * we just went to sleep - fall back to task 0, which never sleeps and
-		 * spends its time halted. That is the idle task in all but name. */
+		 * we just slept or blocked - fall back to task 0, which never does
+		 * either. That is the idle task in all but name. */
 		if (current->state == TASK_RUNNING) {
-			if (flags & 0x200)
-				__asm__ volatile ("sti");
+			irq_restore(flags);
 			return;
 		}
 		next = task_ring;
@@ -221,14 +219,50 @@ void task_schedule(void)
 	task_switch(&prev->esp, next->esp);
 
 	/* Resumed. Restore the interrupt state this thread had when it left. */
-	if (flags & 0x200)
-		__asm__ volatile ("sti");
+	irq_restore(flags);
 
 	/* Execution resumes here when something switches back to `prev`. Note
 	 * that by then `current` points at a different task — the local variables
 	 * are on this thread's stack and survived, but the globals have moved on
 	 * without us. That mental adjustment is most of what makes scheduler code
 	 * confusing to read. */
+}
+
+uint32_t irq_save(void)
+{
+	uint32_t flags;
+	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
+	return flags;
+}
+
+void irq_restore(uint32_t flags)
+{
+	if (flags & 0x200)
+		__asm__ volatile ("sti" ::: "memory");
+}
+
+void task_block(void)
+{
+	if (!enabled || !current)
+		return;
+
+	/* Task 0 is the fallback when nothing else can run, so it must never
+	 * become unrunnable. If it would block, spin instead - correct, just
+	 * wasteful, and it keeps the invariant that something is always
+	 * schedulable. */
+	if (current == task_ring) {
+		task_yield();
+		return;
+	}
+
+	current->state = TASK_BLOCKED;
+	task_schedule();
+}
+
+void task_unblock(struct task *t)
+{
+	if (t && t->state == TASK_BLOCKED)
+		t->state = TASK_READY;
 }
 
 void task_yield(void)
@@ -286,6 +320,7 @@ void task_list(void)
 		const char *state = t->state == TASK_RUNNING  ? "running "
 		                  : t->state == TASK_READY    ? "ready   "
 		                  : t->state == TASK_SLEEPING ? "sleeping"
+		                  : t->state == TASK_BLOCKED  ? "blocked "
 		                  :                             "finished";
 
 		kprintf("  %u   %s  %s\n", t->id, state, t->name);

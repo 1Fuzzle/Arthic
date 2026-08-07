@@ -56,7 +56,7 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.5 - a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.6 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
 	kprintf("Paging, heap, ring 3, scheduler with sleeping, and mutexes.\n");
 }
@@ -248,7 +248,7 @@ static void run_counter_test(int locked)
 		kprintf("  - LOST %u updates\n", expected - shared_counter);
 
 	if (locked)
-		kprintf("lock was contended %u times\n", counter_lock.contended);
+		kprintf("blocked on the lock %u times\n", counter_lock.contended);
 }
 
 static void command_racetest(void)

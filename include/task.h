@@ -20,7 +20,8 @@
 enum task_state {
 	TASK_READY,
 	TASK_RUNNING,
-	TASK_SLEEPING,   /* not runnable until wake_tick */
+	TASK_SLEEPING,   /* not runnable until wake_tick        */
+	TASK_BLOCKED,    /* not runnable until someone wakes it */
 	TASK_FINISHED
 };
 
@@ -37,6 +38,12 @@ struct task {
 	uint32_t     stack_frames;
 	uint32_t     wake_tick;      /* meaningful only while TASK_SLEEPING */
 	struct task *next;
+
+	/* Link field for whatever wait queue this task is parked on. Intrusive
+	 * lists like this are everywhere in kernels: no allocation is needed to
+	 * put a task on a queue, which matters when the code doing it may be
+	 * holding a lock or running with interrupts off. */
+	struct task *wait_next;
 };
 
 /* Turn the current thread of control into task 0. Everything running before
@@ -60,6 +67,16 @@ void task_yield(void);
  * in a loop is that a sleeping task is not considered for scheduling at all -
  * it costs nothing until it is due. */
 void task_sleep(uint32_t ticks);
+
+/* Stop running until somebody calls task_unblock. Unlike sleeping there is no
+ * timeout - if nobody wakes it, it waits forever. */
+void task_block(void);
+void task_unblock(struct task *t);
+
+/* Save the interrupt flag and disable interrupts; restore it later. Returned
+ * value must be treated as opaque. */
+uint32_t irq_save(void);
+void     irq_restore(uint32_t flags);
 
 /* How many context switches have happened. Cheap way to see the scheduler
  * doing work. */
