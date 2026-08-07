@@ -60,6 +60,85 @@ static uint16_t vga_entry(unsigned char ch, uint8_t colour) {
 	return (uint16_t) ch | ((uint16_t) colour << 8);
 }
 
+
+/* ---- Talking to hardware: I/O ports ---------------------------------------
+ * Up to now the only hardware we have touched is the screen, and we did it by
+ * writing to memory at 0xB8000. Most devices are not reachable that way.
+ *
+ * x86 has a SECOND address space, entirely separate from memory, called the
+ * I/O port space. It has its own 65536 addresses and its own two instructions —
+ * `out` to write and `in` to read. Port 0x3D4 has nothing whatsoever to do with
+ * memory address 0x3D4. They are unrelated worlds that happen to both use
+ * numbers.
+ *
+ * C has no way to express `out`, so we drop into assembly. That is what
+ * __asm__ does: it hands the compiler literal instructions to emit.
+ *
+ * Reading the constraint syntax, which is genuinely ugly:
+ *   : : "a"(value), "Nd"(port)   — the empty first slot means no outputs.
+ *                                  "a" = put `value` in register al/ax/eax.
+ *                                  "Nd" = put `port` in dx, or inline it as a
+ *                                  constant if it is small enough.
+ *   volatile                     — do not optimise this away or reorder it.
+ *                                  The compiler cannot see that it has an
+ *                                  effect, because the effect happens outside
+ *                                  the CPU entirely.
+ *
+ * You will write these two functions once and then use them forever. Every
+ * driver from here on — keyboard, timer, disk — goes through them.
+ */
+static inline void outb(uint16_t port, uint8_t value) {
+	__asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint8_t inb(uint16_t port) {
+	uint8_t result;
+	__asm__ volatile ("inb %1, %0" : "=a"(result) : "Nd"(port));
+	return result;
+}
+
+/* ---- The hardware cursor --------------------------------------------------
+ * The blinking underscore is drawn by the VGA controller itself, not by us.
+ * We just tell it where to put it.
+ *
+ * The controller has far more internal registers than it has ports, so it uses
+ * an index/data pair: write WHICH register you want to 0x3D4, then write the
+ * value to 0x3D5. Two ports, dozens of registers. This pattern is everywhere
+ * in hardware.
+ */
+#define VGA_CTRL_PORT 0x3D4   /* "which register do you mean" */
+#define VGA_DATA_PORT 0x3D5   /* "here is the value for it"   */
+
+/* Switch the cursor on and set its shape. start and end are scanlines within
+ * the character cell (0 is the top). 14 and 15 give the classic underscore.  */
+static void terminal_enable_cursor(uint8_t start, uint8_t end) {
+	outb(VGA_CTRL_PORT, 0x0A);
+	/* Read-modify-write: the top bits of this register mean other things, so
+	 * we must preserve them rather than clobbering the whole byte. Bit 5 also
+	 * happens to be the cursor-disable flag, and masking with 0xC0 clears it,
+	 * which is what actually turns the cursor on.                            */
+	outb(VGA_DATA_PORT, (inb(VGA_DATA_PORT) & 0xC0) | start);
+
+	outb(VGA_CTRL_PORT, 0x0B);
+	outb(VGA_DATA_PORT, (inb(VGA_DATA_PORT) & 0xE0) | end);
+}
+
+/* Move the cursor to (x, y).
+ *
+ * The position is a single 16-bit cell offset, but the controller only accepts
+ * one byte at a time, so it is split across two registers — 0x0F takes the low
+ * byte, 0x0E the high byte. Splitting a wide value across narrow registers is
+ * routine once you are talking to real hardware.                             */
+static void terminal_move_cursor(size_t x, size_t y) {
+	uint16_t pos = (uint16_t)(y * VGA_WIDTH + x);
+
+	outb(VGA_CTRL_PORT, 0x0F);
+	outb(VGA_DATA_PORT, (uint8_t)(pos & 0xFF));          /* low 8 bits  */
+
+	outb(VGA_CTRL_PORT, 0x0E);
+	outb(VGA_DATA_PORT, (uint8_t)((pos >> 8) & 0xFF));   /* high 8 bits */
+}
+
 /* ---- Terminal state ------------------------------------------------------- */
 static size_t    terminal_row;
 static size_t    terminal_column;
@@ -86,6 +165,8 @@ void terminal_initialise(void) {
 	terminal_colour = vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK);
 	terminal_buffer = (uint16_t *) 0xB8000;
 
+	terminal_enable_cursor(14, 15);   /* scanlines 14-15: an underscore */
+
 	/* Blank every cell. Nothing clears the screen for us. */
 	for (size_t y = 0; y < VGA_HEIGHT; y++) {
 		for (size_t x = 0; x < VGA_WIDTH; x++) {
@@ -94,6 +175,8 @@ void terminal_initialise(void) {
 			terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_colour);
 		}
 	}
+
+	terminal_move_cursor(0, 0);
 }
 
 void terminal_set_colour(uint8_t colour) {
@@ -162,6 +245,9 @@ void terminal_putchar(char ch) {
 		terminal_scroll();
 		terminal_row = VGA_HEIGHT - 1;
 	}
+
+	/* Keep the hardware cursor in step with where we think we are. */
+	terminal_move_cursor(terminal_column, terminal_row);
 }
 
 /* Write a string.
@@ -208,10 +294,14 @@ void kernel_main(void) {
 	 * completely different thing.                                          */
 	terminal_set_colour(vga_entry_colour(VGA_GREEN, VGA_BLACK));
 	char line[] = "line A - scrolling up, one row at a time\n";
-	for (char c = 'A'; c <= 'Z'; c++) {
+	for (char c = 'A'; c <= 'T'; c++) {
 		line[5] = c;
 		terminal_write(line);
 	}
+
+	/* Leave the cursor sitting after a prompt, so you can see it blinking. */
+	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
+	terminal_write("\narthic> ");
 
 	/* Fall off the end and boot.s parks the CPU. */
 }
