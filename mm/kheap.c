@@ -185,13 +185,13 @@ void kfree(void *ptr)
 	 * continuing would corrupt the heap in a way that surfaces later
 	 * somewhere unrelated — the worst kind of bug to chase. */
 	if (b->magic != BLOCK_MAGIC) {
-		kprintf("kfree: bad or corrupted block at 0x%x — ignoring\n",
+		kprintf("kfree: bad or corrupted block at 0x%x - ignoring\n",
 		        (uint32_t) ptr);
 		return;
 	}
 
 	if (b->free) {
-		kprintf("kfree: double free at 0x%x — ignoring\n", (uint32_t) ptr);
+		kprintf("kfree: double free at 0x%x - ignoring\n", (uint32_t) ptr);
 		return;
 	}
 

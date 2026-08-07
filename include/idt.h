@@ -36,6 +36,10 @@ void idt_install(void);
  * exception goes to the default handler, which prints and halts. Page faults
  * need something better than that. */
 void isr_install_handler(int exception, irq_handler_t handler);
+
+/* Install a handler for any vector, including ones outside 0-47 such as the
+ * syscall gate at 0x80. */
+void isr_install_handler_vector(uint32_t vector, irq_handler_t handler);
 void irq_install_handler(int irq, irq_handler_t handler);
 
 #endif

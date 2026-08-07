@@ -17,7 +17,12 @@
 #define GDT_KERNEL_DATA 0x10   /* entry 2, ring 0 */
 #define GDT_USER_CODE   (0x18 | 3)   /* entry 3, ring 3 */
 #define GDT_USER_DATA   (0x20 | 3)   /* entry 4, ring 3 */
+#define GDT_TSS         0x28         /* entry 5, the Task State Segment */
 
 void gdt_install(void);
+
+/* Fill in the TSS descriptor. Called by tss_install once the structure it
+ * describes actually exists. */
+void gdt_set_tss(uint32_t base, uint32_t limit);
 
 #endif

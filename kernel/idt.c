@@ -34,6 +34,15 @@ static struct idt_ptr   idt_pointer;
 static irq_handler_t irq_handlers[16];
 static irq_handler_t isr_handlers[32];
 
+/* Handlers for vectors outside the 0-47 range. Only 0x80 for now, but keeping
+ * it a small table rather than a special case means adding another later is
+ * one line. */
+#define EXTRA_VECTORS 1
+static struct {
+	uint32_t      vector;
+	irq_handler_t handler;
+} extra_handlers[EXTRA_VECTORS];
+
 /* From interrupts.s. `extern` means "this exists, defined elsewhere". */
 extern void idt_flush(uint32_t);
 extern void isr0(void);  extern void isr1(void);  extern void isr2(void);
@@ -53,6 +62,7 @@ extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
 extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
+extern void isr128(void);
 
 /* Human-readable names, indexed by exception number. When something goes
  * wrong you want to read "General Protection Fault", not "exception 13". */
@@ -135,6 +145,17 @@ void irq_unmask(uint8_t irq)
 	outb(port, (uint8_t)(inb(port) & ~(1 << irq)));
 }
 
+void isr_install_handler_vector(uint32_t vector, irq_handler_t handler)
+{
+	for (int i = 0; i < EXTRA_VECTORS; i++) {
+		if (extra_handlers[i].vector == 0 || extra_handlers[i].vector == vector) {
+			extra_handlers[i].vector  = vector;
+			extra_handlers[i].handler = handler;
+			return;
+		}
+	}
+}
+
 void isr_install_handler(int exception, irq_handler_t handler)
 {
 	if (exception < 0 || exception > 31) return;
@@ -167,6 +188,13 @@ void isr_handler(struct registers *regs)
 	if (regs->int_no < 32 && isr_handlers[regs->int_no]) {
 		isr_handlers[regs->int_no](regs);
 		return;
+	}
+
+	for (int i = 0; i < EXTRA_VECTORS; i++) {
+		if (extra_handlers[i].vector == regs->int_no && extra_handlers[i].handler) {
+			extra_handlers[i].handler(regs);
+			return;
+		}
 	}
 
 	const char *name = (regs->int_no < 32)
@@ -212,6 +240,11 @@ void idt_install(void)
 
 	for (int i = 0; i < 32; i++)
 		isr_handlers[i] = 0;
+
+	for (int i = 0; i < EXTRA_VECTORS; i++) {
+		extra_handlers[i].vector  = 0;
+		extra_handlers[i].handler = 0;
+	}
 
 	pic_remap();
 
@@ -273,6 +306,13 @@ void idt_install(void)
 	idt_set_gate(45, (uint32_t)irq13, GDT_KERNEL_CODE, 0x8E);
 	idt_set_gate(46, (uint32_t)irq14, GDT_KERNEL_CODE, 0x8E);
 	idt_set_gate(47, (uint32_t)irq15, GDT_KERNEL_CODE, 0x8E);
+
+	/* The syscall gate, and the ONLY entry with DPL 3.
+	 *
+	 * 0xEE = present, DPL 3, 32-bit interrupt gate. That DPL is what lets ring
+	 * 3 execute `int $0x80` without a general protection fault. Every other
+	 * gate is DPL 0 precisely so user code cannot invoke handlers directly. */
+	idt_set_gate(0x80, (uint32_t)isr128, GDT_KERNEL_CODE, 0xEE);
 
 	idt_flush((uint32_t)&idt_pointer);
 }

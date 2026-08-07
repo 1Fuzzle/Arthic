@@ -31,4 +31,15 @@ void paging_set_flags(uint32_t virtual_addr, uint32_t flags);
 /* How much memory is identity-mapped. */
 uint32_t paging_mapped_limit(void);
 
+/* Arm recovery: if the next page fault happens, resume at `eip` instead of
+ * halting. Pass 0 to disarm. Used for deliberately risky accesses. */
+void paging_set_fault_resume(uint32_t eip);
+
+/* Try to write to an address. Returns 1 if it worked, 0 if it page-faulted.
+ * The machine survives either way. */
+int paging_probe_write(volatile uint32_t *addr, uint32_t value);
+
+/* Mark a range as accessible from ring 3. */
+void paging_make_user(uint32_t start, uint32_t end, int writable);
+
 #endif

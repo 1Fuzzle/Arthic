@@ -27,6 +27,18 @@ SECTIONS
 	}
 	kernel_text_end = .;
 
+	/* Code ring 3 is allowed to execute. Its own section so it can be given
+	 * its own page permissions — page flags apply per 4 KB page, so anything
+	 * needing different permissions needs its own page. */
+	.usertext BLOCK(4K) : ALIGN(4K)
+	{
+		user_text_start = .;
+		*(.usertext)
+		*(.userdata)
+		. = ALIGN(4K);
+		user_text_end = .;
+	}
+
 	/* Read-only data: string literals, const values. */
 	.rodata BLOCK(4K) : ALIGN(4K)
 	{

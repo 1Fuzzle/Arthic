@@ -17,6 +17,7 @@
 #include "pmm.h"
 #include "paging.h"
 #include "kheap.h"
+#include "usermode.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -42,15 +43,16 @@ static void command_help(void)
 	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
-	kprintf("  wptest        try to write to kernel code (should page fault)\n");
+	kprintf("  user          drop to ring 3 and run a user program\n");
+	kprintf("  wptest        try to write to kernel code (should be blocked)\n");
 	kprintf("  clear         clear the screen\n");
 }
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.1 — a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.2 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Frame allocator, paging, and a kernel heap. No filesystem yet.\n");
+	kprintf("Frame allocator, paging, heap, and ring 3 with syscalls.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -83,17 +85,30 @@ static void command_alloc(void)
  *
  * A test that halts the machine is a blunt instrument, but "did the hardware
  * actually stop me" is not a question you can answer any other way. */
+/* Deliberately write to the kernel's own code, which paging marked read-only.
+ *
+ * paging_probe_write arms the fault handler with a resume address first, so the
+ * fault is caught and reported rather than fatal. That mechanism is not just
+ * for demos: it is exactly what the kernel needs when dereferencing a pointer
+ * that came from ring 3 and might be garbage.
+ */
 static void command_wptest(void)
 {
 	extern uint32_t kernel_text_start;
 	volatile uint32_t *code = (volatile uint32_t *) &kernel_text_start;
 
 	kprintf("writing to kernel code at 0x%x ...\n", (uint32_t) code);
-	kprintf("expect a page fault. if you see 'survived', protection failed.\n");
 
-	*code = 0xDEADBEEF;
+	if (paging_probe_write(code, 0xDEADBEEF))
+		kprintf("SUCCEEDED - write protection is NOT working\n");
+	else
+		kprintf("blocked by the MMU, and the kernel recovered.\n");
+}
 
-	kprintf("survived — WRITE PROTECTION IS NOT WORKING\n");
+static void command_ticks(void)
+{
+	uint32_t t = timer_get_ticks();
+	kprintf("%u ticks, roughly %u seconds since boot\n", t, t / 18);
 }
 
 static void command_heap(void)
@@ -106,8 +121,8 @@ static void command_heap(void)
 	kprintf("  free   %u KB\n", (total - used) / 1024);
 }
 
-/* Exercise the allocator and show what it does. Watch the addresses: the third
- * allocation reuses the space freed by the first, which is the whole point. */
+/* Exercise the allocator. Watch the addresses: the third allocation reuses the
+ * space freed by the first, which is the whole point of having a free list. */
 static void command_heaptest(void)
 {
 	char *a = (char *) kmalloc(64);
@@ -121,7 +136,6 @@ static void command_heaptest(void)
 	kprintf("a = kmalloc(64)   -> 0x%x\n", (uint32_t) a);
 	kprintf("b = kmalloc(128)  -> 0x%x\n", (uint32_t) b);
 
-	/* Prove the memory is genuinely usable, not just an address. */
 	for (int i = 0; i < 63; i++)
 		a[i] = 'x';
 	a[63] = '\0';
@@ -142,10 +156,12 @@ static void command_heaptest(void)
 	kprintf("all freed\n");
 }
 
-static void command_ticks(void)
+/* Drop to ring 3, run a small program, come back. */
+static void command_user(void)
 {
-	uint32_t t = timer_get_ticks();
-	kprintf("%u ticks, roughly %u seconds since boot\n", t, t / 18);
+	kprintf("entering ring 3 ...\n");
+	usermode_run();
+	kprintf("back in ring 0.\n");
 }
 
 /* Run whatever is in the buffer. `buffer` is already NUL-terminated by the
@@ -169,6 +185,8 @@ static void execute(const char *line)
 		command_heap();
 	else if (kstrcmp(line, "heaptest") == 0)
 		command_heaptest();
+	else if (kstrcmp(line, "user") == 0)
+		command_user();
 	else if (kstrcmp(line, "wptest") == 0)
 		command_wptest();
 	else if (kstrcmp(line, "clear") == 0)

@@ -135,8 +135,34 @@ void paging_set_flags(uint32_t virtual_addr, uint32_t flags)
  * silently is exactly the difference between a bug you can find and one you
  * cannot.
  */
+/* Where to resume if the next fault is an expected one.
+ *
+ * Real kernels need this. When the kernel touches a pointer handed to it by
+ * ring 3, that pointer may be garbage — and dying because a user program lied
+ * is not acceptable. Linux calls the equivalent an exception table; it is how
+ * copy_from_user survives a bad address.
+ *
+ * The mechanism: record a resume address, do the risky access, and if it
+ * faults, the handler rewrites the saved EIP so `iret` returns to the resume
+ * point instead of to the instruction that failed. We can do that because the
+ * saved registers live on the stack we were handed, and editing them edits
+ * what iret restores.
+ */
+extern volatile uint32_t fault_resume_eip;   /* defined in interrupts.s */
+
+void paging_set_fault_resume(uint32_t eip)
+{
+	fault_resume_eip = eip;
+}
+
 static void page_fault_handler(struct registers *regs)
 {
+	if (fault_resume_eip) {
+		regs->eip = fault_resume_eip;
+		fault_resume_eip = 0;
+		return;   /* iret goes to the resume point; the machine survives */
+	}
+
 	uint32_t faulting_address;
 	__asm__ volatile ("mov %%cr2, %0" : "=r"(faulting_address));
 
@@ -237,4 +263,45 @@ void paging_init(void)
 uint32_t paging_mapped_limit(void)
 {
 	return mapped_limit;
+}
+
+/* Attempt a write, surviving a fault. The real work is in interrupts.s. */
+extern int probe_write(volatile uint32_t *addr, uint32_t value);
+
+int paging_probe_write(volatile uint32_t *addr, uint32_t value)
+{
+	return probe_write(addr, value);
+}
+
+/* Give ring 3 access to a range of pages.
+ *
+ * Note the deliberate asymmetry: `writable` is a parameter, because code should
+ * be mapped read-only and data writable, and nothing should be both. That is
+ * as close to W^X as 32-bit paging permits — no NX bit means user code pages
+ * are executable whether we like it or not, but at least they are not writable.
+ */
+void paging_make_user(uint32_t start, uint32_t end, int writable)
+{
+	uint32_t flags = PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
+
+	for (uint32_t addr = start & ~(PAGE_SIZE - 1); addr < end; addr += PAGE_SIZE) {
+		/* PERMISSIONS ARE THE AND OF BOTH LEVELS.
+		 *
+		 * A translation walks the page directory and then the page table, and
+		 * an access is allowed only if BOTH entries permit it. Setting the
+		 * user bit on the page table entry alone achieves nothing while the
+		 * directory entry above it is supervisor-only — the CPU stops at the
+		 * first level and refuses.
+		 *
+		 * This is easy to miss because the failure looks identical to
+		 * forgetting the page table entry, and everything you inspect at the
+		 * table level looks correct.
+		 *
+		 * Opening the directory entry is not itself a hole: every page under
+		 * it still needs its own user bit, and they do not have one. The
+		 * directory entry grants permission to ask, not permission to read. */
+		page_directory[addr >> 22] |= PAGE_USER;
+
+		paging_set_flags(addr, flags);
+	}
 }

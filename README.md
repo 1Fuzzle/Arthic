@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state — v1.1
+## Current state — v1.2
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -17,10 +17,16 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   set, all kernel pages supervisor-only, page fault handler reporting CR2
 - Kernel heap: 1 MB, first-fit with block splitting and coalescing, magic-number
   guards against double free and corruption
+- TSS and ring 3: a user program runs at reduced privilege and reaches the
+  kernel only through `int 0x80`, the single IDT gate with DPL 3
+- Syscalls with argument validation: every pointer from ring 3 is range-checked
+  and length-bounded before the kernel touches it
+- Recoverable page faults, so the kernel survives a bad pointer instead of
+  halting - the same mechanism Linux uses for `copy_from_user`
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
-  `wptest`, `echo`, `clear`
+  `user`, `wptest`, `echo`, `clear`
 
-No filesystem, no user mode yet.
+No scheduler, no filesystem yet.
 
 ### On W^X — a known gap
 
@@ -133,9 +139,10 @@ Should be `0`.
 6. ~~Physical memory manager~~ (v0.9)
 7. ~~Paging~~ (v1.0) — write protection done; NX blocked until PAE or long mode
 8. ~~Heap (kmalloc)~~ (v1.1)
-9. **Next:** TSS and user mode — ring 3, and a syscall gate
-10. Later: 64-bit long mode — and with it, a real NX bit
-11. Later: a filesystem
+9. ~~TSS and user mode~~ (v1.2) - ring 3 and a validated syscall gate
+10. **Next:** a scheduler - more than one thing running at a time
+11. Later: 64-bit long mode, and with it a real NX bit
+12. Later: a filesystem
 
 ## Reference
 

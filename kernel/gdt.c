@@ -59,7 +59,7 @@ struct gdt_ptr {
 	uint32_t base;
 } __attribute__((packed));
 
-static struct gdt_entry gdt[5];
+static struct gdt_entry gdt[6];
 static struct gdt_ptr   gdt_pointer;
 
 /* Fill in one descriptor, scattering base and limit into their fields.
@@ -116,6 +116,16 @@ static void gdt_flush(uint32_t pointer_address)
 	);
 }
 
+/* A TSS descriptor sits in the GDT like any other, but its access byte says
+ * "system descriptor" rather than "code or data":
+ *   0x89 = present, DPL 0, type 9 (available 32-bit TSS)
+ * and granularity is 0, meaning the limit is in bytes rather than 4 KB units —
+ * the structure is only about 104 bytes. */
+void gdt_set_tss(uint32_t base, uint32_t limit)
+{
+	gdt_set_gate(5, base, limit - 1, 0x89, 0x00);
+}
+
 void gdt_install(void)
 {
 	gdt_pointer.limit = (uint16_t)(sizeof(gdt) - 1);
@@ -144,6 +154,9 @@ void gdt_install(void)
 	gdt_set_gate(2, 0, 0xFFFFF, 0x92, 0xCF);   /* kernel data, ring 0 */
 	gdt_set_gate(3, 0, 0xFFFFF, 0xFA, 0xCF);   /* user code,   ring 3 */
 	gdt_set_gate(4, 0, 0xFFFFF, 0xF2, 0xCF);   /* user data,   ring 3 */
+
+	/* Entry 5 is the TSS, filled in later by tss_install. Zero for now. */
+	gdt_set_gate(5, 0, 0, 0, 0);
 
 	gdt_flush((uint32_t)&gdt_pointer);
 }

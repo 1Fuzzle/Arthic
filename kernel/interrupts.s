@@ -114,6 +114,16 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
+/* --- the syscall vector ---------------------------------------------------
+ * Ring 3 reaches the kernel through this one entry point and no other.
+ */
+.global isr128
+isr128:
+	cli
+	push $0
+	push $128
+	jmp isr_common_stub
+
 /* --- the shared tail -------------------------------------------------------
  * Every stub above jumps here. This saves the CPU state, switches to kernel
  * data segments, calls C, then puts everything back exactly as it was.
@@ -192,3 +202,109 @@ idt_flush:
 	ret
 
 .section .note.GNU-stack,"",@progbits
+
+/* --- entering and leaving ring 3 -------------------------------------------
+ * This lives in assembly rather than inline asm because it deliberately
+ * abandons and restores the stack, and the compiler cannot be told that. An
+ * earlier inline version worked once and then looped forever, because GCC was
+ * free to place the resume label wherever it liked relative to the iret.
+ *
+ * When the boundary IS the stack, the code that crosses it belongs here.
+ */
+.section .bss
+.align 4
+kernel_saved_esp: .skip 4
+kernel_saved_ebp: .skip 4
+
+.section .text
+
+/* void usermode_jump(uint32_t entry, uint32_t user_stack_top);
+ *
+ * Does not return. Control comes back through usermode_return, which resumes
+ * as though this function had returned normally.
+ */
+.global usermode_jump
+usermode_jump:
+	/* esp still points at our return address — no pushes yet. Saving it now
+	 * means usermode_return can `ret` straight to our caller. */
+	mov %esp, kernel_saved_esp
+	mov %ebp, kernel_saved_ebp
+
+	mov 4(%esp), %ecx        /* entry point   */
+	mov 8(%esp), %edx        /* user stack    */
+
+	cli
+
+	mov $0x23, %ax           /* user data selector, RPL 3 */
+	mov %ax, %ds
+	mov %ax, %es
+	mov %ax, %fs
+	mov %ax, %gs
+
+	pushl $0x23              /* SS     */
+	pushl %edx               /* ESP    */
+	pushfl
+	popl %eax
+	orl $0x200, %eax         /* set IF, or ring 3 runs uninterruptible */
+	pushl %eax               /* EFLAGS */
+	pushl $0x1B              /* CS, user code selector, RPL 3 */
+	pushl %ecx               /* EIP    */
+	iret
+
+/* void usermode_return(void);
+ *
+ * Called from the SYS_EXIT handler, on the kernel stack the TSS supplied.
+ * Throws that stack away and continues on the one usermode_jump was using.
+ */
+.global usermode_return
+usermode_return:
+	cli
+	mov kernel_saved_esp, %esp
+	mov kernel_saved_ebp, %ebp
+
+	mov $0x10, %ax           /* back to kernel data selectors */
+	mov %ax, %ds
+	mov %ax, %es
+	mov %ax, %fs
+	mov %ax, %gs
+
+	sti
+	ret                      /* returns to whoever called usermode_jump */
+
+/* --- surviving an expected fault -------------------------------------------
+ * The page fault handler reads fault_resume_eip. If it is non-zero, it rewrites
+ * the saved EIP so `iret` returns there instead of retrying the instruction
+ * that faulted.
+ *
+ * This is in assembly because the resume point must be a specific instruction
+ * address, and at -O2 the compiler will happily move a C label relative to the
+ * code around it. An earlier inline version looped forever for exactly that
+ * reason.
+ *
+ * The same mechanism is what a real kernel uses for copy_from_user: touch a
+ * pointer that ring 3 supplied, and if it turns out to be garbage, recover
+ * instead of dying.
+ */
+.global fault_resume_eip
+.section .bss
+.align 4
+fault_resume_eip: .skip 4
+
+.section .text
+
+/* int probe_write(volatile uint32_t *addr, uint32_t value);
+ * Returns 1 if the write succeeded, 0 if it faulted. */
+.global probe_write
+probe_write:
+	mov 4(%esp), %ecx                  /* address */
+	mov 8(%esp), %edx                  /* value   */
+
+	movl $probe_write_fault, fault_resume_eip
+
+	xor %eax, %eax                     /* assume failure */
+	mov %edx, (%ecx)                   /* <- the risky store */
+	mov $1, %eax                       /* reached only if it worked */
+
+probe_write_fault:
+	movl $0, fault_resume_eip          /* disarm either way */
+	ret

@@ -16,6 +16,9 @@
 #include "pmm.h"
 #include "paging.h"
 #include "kheap.h"
+#include "tss.h"
+#include "syscall.h"
+#include "usermode.h"
 #include "multiboot.h"
 
 /* ---- Entry point ----------------------------------------------------------
@@ -32,7 +35,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v1.1\n");
+	terminal_write("Arthic kernel v1.2\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -56,7 +59,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	 * the pointer it supposedly left us. */
 	if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
 		terminal_set_colour(vga_entry_colour(VGA_LIGHT_RED, VGA_BLACK));
-		kprintf("bad multiboot magic: 0x%x — refusing to continue\n", magic);
+		kprintf("bad multiboot magic: 0x%x - refusing to continue\n", magic);
 		for (;;)
 			__asm__ volatile ("cli; hlt");
 	}
@@ -64,6 +67,17 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	pmm_init(mbi);
 	paging_init();
 	kheap_init();
+
+	/* The TSS needs a kernel stack address; usermode_run refines it per
+	 * entry, so any sane value will do here. */
+	{
+		uint32_t esp;
+		__asm__ volatile ("mov %%esp, %0" : "=r" (esp));
+		tss_install(esp);
+	}
+
+	syscall_install();
+	usermode_init();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
@@ -78,6 +92,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 		kprintf("Heap  ready: %u KB, first-fit with coalescing.\n",
 		        heap_total / 1024);
 	}
+	kprintf("TSS + ring 3 ready. Syscall gate at int 0x80, DPL 3.\n");
 	kprintf("kprintf is alive.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
@@ -90,7 +105,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	kprintf("  string       %s\n", "Arthic");
 	kprintf("  character    %c\n", 'A');
 	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 1, 0xB8000u);
+	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 2, 0xB8000u);
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("\nInterrupts enabled. Keyboard live. Type 'help'.\n\n");

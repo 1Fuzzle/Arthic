@@ -41,6 +41,9 @@ kernel/gdt.c         GDT, flat model, ring 0 + ring 3 descriptors, no TSS
 kernel/idt.c         IDT, PIC remap to 32-47, exception and IRQ dispatch
 kernel/interrupts.s  48 stubs + idt_flush
 kernel/shell.c       line buffer, command dispatch
+kernel/tss.c         TSS - kernel stack for ring 3 entry, I/O bitmap denies port access
+kernel/syscall.c     int 0x80 dispatch, user pointer validation
+kernel/usermode.c    ring 3 entry/exit, demo user program in .usertext
 drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter
