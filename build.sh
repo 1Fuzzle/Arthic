@@ -34,7 +34,7 @@ ASFLAGS="-m32"
 
 if [ "$1" = "clean" ]; then
 	rm -rf "$BUILD" arthic.bin
-	echo "cleaned"
+	echo "cleaned (arthic.img kept - delete it by hand to wipe the disk)"
 	exit 0
 fi
 
@@ -50,7 +50,8 @@ done
 # C sources
 for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
-           mm/pmm.c mm/paging.c mm/kheap.c lib/string.c; do
+           mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
+           drivers/ata.c fs/fs.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
 	echo "compiling  $src"
 	gcc $CFLAGS -c "$src" -o "$obj"
@@ -63,7 +64,17 @@ gcc -m32 -no-pie -Wl,--build-id=none -T linker.ld -o arthic.bin \
 echo
 echo "built: arthic.bin"
 
+# A disk image for the filesystem to live on. Created once and then kept, so
+# files survive between runs - which is rather the point of a filesystem.
+DISK=arthic.img
+
 if [ "$1" = "run" ]; then
+	if [ ! -f "$DISK" ]; then
+		echo "creating $DISK (16 MB)"
+		dd if=/dev/zero of="$DISK" bs=1M count=16 2>/dev/null
+	fi
+
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
-	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin
+	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin \
+	    -drive file="$DISK",format=raw,if=ide
 fi

@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v1.6
+## Current state - v1.7
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -31,8 +31,12 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   not a scheduling candidate at all until the holder wakes it
 - A demonstration of the race a lock prevents, and of the lost-wakeup race that
   naive blocking would introduce
+- ATA PIO disk driver: LBA28, read and write sectors, with cache flush
+- ArthicFS: superblock, 64-entry directory, block bitmap, contiguous files -
+  and files survive a reboot
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
-  `tasks`, `spawn`, `racetest`, `locktest`, `user`, `wptest`, `echo`, `clear`
+  `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
+  `format`, `user`, `wptest`, `echo`, `clear`
 
 No filesystem yet.
 
@@ -84,7 +88,10 @@ Arthic/
 ├── drivers/
 │   ├── terminal.c    VGA text output, scrolling, cursor, kprintf
 │   ├── keyboard.c    PS/2 scancodes to characters
-│   └── timer.c       PIT tick counter
+│   ├── timer.c       PIT tick counter
+│   └── ata.c         PIO disk driver
+├── fs/
+│   └── fs.c          ArthicFS - format, directory, block bitmap, files
 ├── mm/
 │   ├── pmm.c         physical frame allocator (bitmap)
 │   ├── paging.c      page directory and tables, MMU setup, page fault handler
@@ -103,6 +110,9 @@ does not, that is a hint the thing is doing two jobs.
 
 `build/` holds object files so they are not scattered through the source tree.
 `./build.sh clean` deletes it.
+
+`arthic.img` is a 16 MB disk image, created automatically on first run and kept
+between runs so files persist. Delete it by hand to start from a blank disk.
 
 ## Build flags that matter
 
@@ -152,8 +162,10 @@ Should be `0`.
 11. ~~Sleeping~~ (v1.4)
 12. ~~Mutexes~~ (v1.5)
 13. ~~Wait queues~~ (v1.6)
-14. **Next:** a filesystem - disk driver, then a format, then `ls` and `cat`
-15. Later: 64-bit long mode, and with it a real NX bit
+14. ~~Filesystem~~ (v1.7)
+15. **Next:** block-mapped files, so a file need not be contiguous and can grow
+16. Later: 64-bit long mode, and with it a real NX bit
+17. Later: loading a program from disk and running it in ring 3
 
 ## Reference
 

@@ -1,3 +1,4 @@
 build/
 arthic.bin
 *.o
+arthic.img

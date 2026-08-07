@@ -20,6 +20,8 @@
 #include "syscall.h"
 #include "usermode.h"
 #include "task.h"
+#include "ata.h"
+#include "fs.h"
 #include "multiboot.h"
 
 /* ---- Entry point ----------------------------------------------------------
@@ -36,7 +38,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v1.6\n");
+	terminal_write("Arthic kernel v1.7\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -81,6 +83,11 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	usermode_init();
 	task_init();
 
+	if (ata_init()) {
+		if (!fs_mount())
+			kprintf("Disk found, no ArthicFS on it - run 'format'.\n");
+	}
+
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
 	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
@@ -96,6 +103,12 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	}
 	kprintf("TSS + ring 3 ready. Syscall gate at int 0x80, DPL 3.\n");
 	kprintf("Scheduler running: preemptive round robin, with sleeping.\n");
+	if (ata_sector_count())
+		kprintf("Disk: %u sectors, %u MB. Filesystem %s.\n",
+		        ata_sector_count(), ata_sector_count() / 2048,
+		        fs_is_mounted() ? "mounted" : "not formatted");
+	else
+		kprintf("No disk attached.\n");
 	kprintf("kprintf is alive.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
@@ -108,7 +121,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	kprintf("  string       %s\n", "Arthic");
 	kprintf("  character    %c\n", 'A');
 	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 6, 0xB8000u);
+	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 7, 0xB8000u);
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("\nInterrupts enabled. Keyboard live. Type 'help'.\n\n");

@@ -50,6 +50,8 @@ kernel/lock.c        mutex on atomic_xchg, FIFO wait queue, waiters block
 drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter
+drivers/ata.c        ATA PIO disk driver, LBA28, polled
+fs/fs.c              ArthicFS - superblock, directory, bitmap, contiguous files
 mm/pmm.c             physical frame allocator, bitmap, driven by multiboot mmap
 mm/paging.c          page directory/tables, all RAM identity-mapped, CR0.WP, page fault handler
 mm/kheap.c           kmalloc/kfree, first-fit, splitting, coalescing, magic guards

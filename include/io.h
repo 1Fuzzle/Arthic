@@ -23,6 +23,18 @@ static inline uint8_t inb(uint16_t port) {
 	return result;
 }
 
+/* 16-bit port access. Disk data arrives a word at a time, so the ATA driver
+ * needs these; nothing else has so far. */
+static inline void outw(uint16_t port, uint16_t value) {
+	__asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static inline uint16_t inw(uint16_t port) {
+	uint16_t result;
+	__asm__ volatile ("inw %1, %0" : "=a"(result) : "Nd"(port));
+	return result;
+}
+
 /* Some old hardware needs a moment between consecutive writes. Writing to
  * unused port 0x80 wastes exactly the right amount of time — an ugly trick,
  * but a universal one. */
