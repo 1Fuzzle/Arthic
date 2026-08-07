@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v2.1
+## Current state - v2.2
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -43,11 +43,17 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   different physical memory, none able to see the others
 - Pipes: a bounded ring buffer with blocking on both sides, so a fast producer
   is made to wait rather than dropping data or growing without limit
-- `kill` - terminate a running task from the shell
+- Pipes reachable from ring 3, so two separate processes can talk through one
+- Program arguments: `run prog write` and `run prog read` are the same binary
+  behaving differently
+- `kill` - terminate a running task from the shell, and `spin` to give it
+  something that genuinely will not stop on its own
+- Console output serialised, so two tasks printing at once no longer interleave
+  mid-word
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
-  `format`, `install`, `run`, `kill`, `pipetest`, `pipestat`, `user`, `wptest`,
-  `echo`, `clear`
+  `format`, `install`, `run`, `spin`, `kill`, `pipetest`, `pipestat`, `user`,
+  `wptest`, `echo`, `clear`
 
 No filesystem yet.
 
@@ -181,8 +187,8 @@ Should be `0`.
 16. ~~ELF loading~~ (v1.9)
 17. ~~Processes with separate address spaces~~ (v2.0)
 18. ~~kill, and pipes~~ (v2.1)
-19. **Next:** exposing pipes to ring 3, so two programs can talk
-20. Later: block-mapped files, so a file need not be contiguous and can grow
+19. ~~Pipes for ring 3, program arguments, console lock~~ (v2.2)
+20. **Next:** block-mapped files, so a file need not be contiguous and can grow
 21. Later: 64-bit long mode, and with it a real NX bit
 
 ### A known limitation

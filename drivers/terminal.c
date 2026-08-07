@@ -16,6 +16,35 @@
 #include "terminal.h"
 #include "io.h"
 
+/* ---- serialising the console ----------------------------------------------
+ * Two tasks writing at once interleave mid-word: you get "kill 1[task 5] 2 of"
+ * instead of two clean lines. Same shape as the counter in racetest, just with
+ * characters instead of arithmetic.
+ *
+ * The fix is NOT a mutex, and the reason matters. kprintf is called from
+ * interrupt handlers - the page fault reporter, for one. A mutex blocks, and
+ * blocking inside an interrupt handler means the handler never returns, which
+ * is a deadlock rather than a delay.
+ *
+ * A console lock must therefore be something that cannot block. On one CPU,
+ * disabling interrupts is exactly that: nothing else can run to interleave
+ * with us, whether it is another task or another interrupt. It is a blunt tool
+ * and it is the right one, which is why real kernels do the same for their
+ * emergency print paths.
+ */
+static inline uint32_t console_lock(void)
+{
+	uint32_t flags;
+	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
+	return flags;
+}
+
+static inline void console_unlock(uint32_t flags)
+{
+	if (flags & 0x200)
+		__asm__ volatile ("sti" ::: "memory");
+}
+
 /* ---- Types ----------------------------------------------------------------
  * stdint.h and stddef.h are two of the very few headers that are safe here,
  * because they contain no code at all — only type definitions.
@@ -260,9 +289,14 @@ void terminal_putchar(char ch) {
  * you find the end. This is the source of a great many real-world security
  * bugs, and you are seeing the reason for them directly.
  */
-void terminal_write(const char *str) {
+void terminal_write(const char *str)
+{
+	uint32_t flags = console_lock();
+
 	for (size_t i = 0; str[i] != '\0'; i++)
 		terminal_putchar(str[i]);
+
+	console_unlock(flags);
 }
 
 
@@ -349,6 +383,9 @@ static void terminal_write_int(int32_t value) {
  * Supported: %d %u %x %s %c %%
  */
 void kprintf(const char *fmt, ...) {
+	/* Held for the whole call, not per character, so a line comes out whole. */
+	uint32_t flags = console_lock();
+
 	va_list args;
 	va_start(args, fmt);      /* start reading after `fmt` */
 
@@ -397,5 +434,7 @@ void kprintf(const char *fmt, ...) {
 	}
 
 	va_end(args);
+
+	console_unlock(flags);
 }
 

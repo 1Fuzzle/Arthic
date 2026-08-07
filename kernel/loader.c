@@ -98,6 +98,7 @@ struct program {
 
 	uint32_t segments;
 	uint32_t stack_phys;
+	uint32_t args_phys;
 	char     name[32];
 	int      in_use;
 };
@@ -172,6 +173,11 @@ static void unload(struct program *prog)
 	}
 	prog->segments = 0;
 
+	if (prog->args_phys) {
+		pmm_free_frame(prog->args_phys);
+		prog->args_phys = 0;
+	}
+
 	if (prog->stack_phys) {
 		uint32_t pages = USER_STACK_SIZE / PAGE_SIZE;
 		for (uint32_t i = 0; i < pages; i++)
@@ -223,7 +229,7 @@ static void program_task(void)
 	usermode_jump(prog->entry, USER_STACK_TOP - 16);
 }
 
-int loader_run(const char *name)
+int loader_run(const char *name, const char *args)
 {
 	struct program *prog = 0;
 
@@ -336,6 +342,26 @@ int loader_run(const char *name)
 			unload(prog);
 			return 0;
 		}
+	}
+
+	/* The argument page. Read-only from ring 3 - a program has no business
+	 * rewriting what it was told. */
+	prog->args_phys = pmm_alloc_frame();
+	if (prog->args_phys) {
+		char *dest = (char *) prog->args_phys;
+		kmemset(dest, 0, PAGE_SIZE);
+
+		uint32_t i = 0;
+		if (args) {
+			while (args[i] && i < USER_ARGS_MAX - 1) {
+				dest[i] = args[i];
+				i++;
+			}
+		}
+		dest[i] = '\0';
+
+		paging_map(USER_ARGS_ADDR, prog->args_phys,
+		           PAGE_PRESENT | PAGE_USER);
 	}
 
 	paging_switch(saved);

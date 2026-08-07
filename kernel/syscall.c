@@ -25,6 +25,13 @@
 #include "usermode.h"
 #include "paging.h"
 #include "task.h"
+#include "pipe.h"
+
+/* The one channel programs share. A real system would give each pipe an
+ * identifier and let a program hold several; one global channel is enough to
+ * show two processes talking, and honest about being a demonstration. */
+static struct pipe ipc_pipe;
+static int ipc_ready = 0;
 
 /* The window ring 3 may legitimately reference. Set by usermode_init. */
 static uint32_t user_range_start = 0;
@@ -46,6 +53,34 @@ void syscall_set_user_range(uint32_t start, uint32_t end)
  * The length cap is a third line of defence: even a valid pointer should not be
  * able to make the kernel loop for an unbounded time.
  */
+/* Is a buffer of `length` bytes at `ptr` entirely inside the user region?
+ *
+ * Three checks, and all three are load-bearing. The start must be in range.
+ * The length must be sane on its own - an enormous one would make the addition
+ * below wrap around and produce an end address that looks fine. And the end
+ * must be in range too.
+ *
+ * That middle check is the one people forget, and integer overflow in a bounds
+ * check is how a great many exploits begin: ptr + length wraps past zero, the
+ * comparison passes, and the kernel then copies gigabytes.
+ */
+static int user_buffer_ok(uint32_t ptr, uint32_t length)
+{
+	if (length == 0 || length > 4096)
+		return 0;
+
+	if (ptr < user_range_start || ptr >= user_range_end)
+		return 0;
+
+	if (ptr + length < ptr)          /* overflow */
+		return 0;
+
+	if (ptr + length > user_range_end)
+		return 0;
+
+	return 1;
+}
+
 static int user_string_ok(uint32_t ptr, uint32_t max_length)
 {
 	if (ptr < user_range_start || ptr >= user_range_end)
@@ -99,6 +134,38 @@ static void syscall_dispatch(struct registers *regs)
 		regs->eax = t ? t->id : 0;
 		return;
 	}
+
+	case SYS_PIPE_WRITE:
+		if (!ipc_ready) {
+			pipe_init(&ipc_pipe);
+			ipc_ready = 1;
+		}
+
+		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
+			kprintf("[syscall] rejected bad write buffer 0x%x len %u\n",
+			        regs->ebx, regs->ecx);
+			regs->eax = (uint32_t) -1;
+			return;
+		}
+
+		regs->eax = pipe_write(&ipc_pipe, (const char *) regs->ebx, regs->ecx);
+		return;
+
+	case SYS_PIPE_READ:
+		if (!ipc_ready) {
+			pipe_init(&ipc_pipe);
+			ipc_ready = 1;
+		}
+
+		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
+			kprintf("[syscall] rejected bad read buffer 0x%x len %u\n",
+			        regs->ebx, regs->ecx);
+			regs->eax = (uint32_t) -1;
+			return;
+		}
+
+		regs->eax = pipe_read(&ipc_pipe, (char *) regs->ebx, regs->ecx);
+		return;
 
 	case SYS_EXIT: {
 		struct task *t = task_current();

@@ -12,9 +12,17 @@
 #define USER_STACK_TOP   0x20200000u
 #define USER_STACK_SIZE  8192u
 
+/* One page holding the argument string, mapped read-only. A fixed address
+ * rather than something passed in a register: the program has no startup code
+ * to unpack arguments, so an agreed location is the simplest contract that
+ * works. Real systems put argv on the stack and let the C runtime sort it out,
+ * which needs a C runtime. */
+#define USER_ARGS_ADDR   0x20100000u
+#define USER_ARGS_MAX    256u
+
 /* Read `name` from the filesystem, map it, and run it in ring 3. Returns when
  * the program exits. 0 means it could not be loaded. */
-int loader_run(const char *name);
+int loader_run(const char *name, const char *args);
 
 /* Write the built-in demo program to the filesystem as a file. */
 int loader_install(const char *name);

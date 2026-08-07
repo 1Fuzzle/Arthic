@@ -50,11 +50,13 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  tasks         list threads\n");
+	kprintf("  spin          start a task that loops forever\n");
 	kprintf("  kill <id>     terminate a task\n");
 	kprintf("  pipetest      a producer and consumer sharing a pipe\n");
 	kprintf("  pipestat      pipe contents and how often each side blocked\n");
 	kprintf("  install       write the demo program to the disk\n");
-	kprintf("  run <name>    load a program - it runs as its own process\n");
+	kprintf("  run <name> [arg]  load a program as its own process\n");
+	kprintf("                    try: run prog read   and   run prog write\n");
 	kprintf("  ls            list files\n");
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
@@ -419,14 +421,28 @@ static void command_install(void)
 
 static void command_run(const char *line)
 {
-	const char *name = argument_after(line, "run ");
+	const char *rest = argument_after(line, "run ");
 
-	if (!name) {
-		kprintf("usage: run <name>\n");
+	if (!rest) {
+		kprintf("usage: run <name> [argument]\n");
 		return;
 	}
 
-	loader_run(name);
+	/* Split the name from whatever follows it. */
+	char name[FS_NAME_MAX];
+	uint32_t i = 0;
+
+	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
+		name[i] = rest[i];
+		i++;
+	}
+	name[i] = '\0';
+
+	const char *args = rest + i;
+	while (*args == ' ')
+		args++;
+
+	loader_run(name, args);
 }
 
 /* ---- Pipes -----------------------------------------------------------------
@@ -547,6 +563,28 @@ static void command_kill(const char *line)
 		kprintf("no such task, or it is task 0\n");
 }
 
+/* A task that never stops on its own - something for kill to actually be
+ * needed for. Without it, kill only ever finishes off threads that were about
+ * to exit anyway, which proves nothing. */
+static volatile uint32_t spin_counter = 0;
+
+static void spin_thread(void)
+{
+	for (;;)
+		spin_counter++;
+}
+
+static void command_spin(void)
+{
+	uint32_t id = task_create("spin", spin_thread);
+
+	if (id)
+		kprintf("task %u is now looping forever - 'kill %u' to stop it\n",
+		        id, id);
+	else
+		kprintf("could not create the task\n");
+}
+
 static void command_spawn(void)
 {
 	uint32_t id = task_create("demo", demo_thread);
@@ -604,6 +642,8 @@ static void execute(const char *line)
 		command_cat(line);
 	else if (kstartswith(line, "rm "))
 		command_rm(line);
+	else if (kstrcmp(line, "spin") == 0)
+		command_spin();
 	else if (kstartswith(line, "kill "))
 		command_kill(line);
 	else if (kstrcmp(line, "pipetest") == 0)

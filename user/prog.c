@@ -14,6 +14,11 @@
 #define SYS_EXIT  2
 #define SYS_SLEEP 3
 #define SYS_ID    4
+#define SYS_PIPE_WRITE 5
+#define SYS_PIPE_READ  6
+
+/* Where the loader leaves whatever `run prog <this>` was given. */
+#define ARGS ((const char *) 0x20100000)
 
 /* The one door out. eax carries which call, ebx the argument, and the result
  * comes back in eax. That convention is ours - Linux uses the same registers
@@ -27,6 +32,28 @@ static int syscall(int number, int arg)
 	                  : "a" (number), "b" (arg)
 	                  : "memory");
 	return result;
+}
+
+/* Two arguments: a buffer and a length. The kernel checks both, and it has to -
+ * either one being wrong is a way to make it read or write memory on our
+ * behalf. */
+static int syscall2(int number, int arg1, int arg2)
+{
+	int result;
+	__asm__ volatile ("int $0x80"
+	                  : "=a" (result)
+	                  : "a" (number), "b" (arg1), "c" (arg2)
+	                  : "memory");
+	return result;
+}
+
+static int streq(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
 }
 
 static void print(const char *s)
@@ -72,9 +99,72 @@ static unsigned int counter;
 /* The entry point is now DECLARED in the ELF header rather than assumed to be
  * the first byte, so its position in the file no longer matters. Kept in its
  * own section anyway, because it costs nothing and keeps the layout readable. */
+/* ---- the two pipe modes ----------------------------------------------------
+ *
+ * Same binary, different behaviour depending on the argument. Two separate
+ * processes, in separate address spaces, sharing nothing except a channel the
+ * kernel owns - which is exactly what a pipe is for.
+ */
+static void run_writer(void)
+{
+	char line[] = "line 00 through the pipe\n";
+
+	print("  [writer] sending 20 lines\n");
+
+	for (int i = 1; i <= 20; i++) {
+		line[5] = (char)('0' + (i / 10) % 10);
+		line[6] = (char)('0' + i % 10);
+
+		int length = 0;
+		while (line[length])
+			length++;
+
+		syscall2(SYS_PIPE_WRITE, (int) line, length);
+	}
+
+	syscall2(SYS_PIPE_WRITE, (int) "DONE\n", 5);
+	print("  [writer] finished\n");
+}
+
+static void run_reader(void)
+{
+	char chunk[65];
+
+	print("  [reader] waiting on the pipe\n");
+
+	for (;;) {
+		int got = syscall2(SYS_PIPE_READ, (int) chunk, 64);
+
+		if (got <= 0)
+			break;
+
+		chunk[got] = '\0';
+		print(chunk);
+
+		for (int i = 0; i + 3 < got; i++) {
+			if (chunk[i] == 'D' && chunk[i+1] == 'O' &&
+			    chunk[i+2] == 'N' && chunk[i+3] == 'E') {
+				print("  [reader] finished\n");
+				return;
+			}
+		}
+	}
+}
+
 __attribute__((section(".text._start")))
 void _start(void)
 {
+	/* Behave differently depending on what we were told. */
+	if (streq(ARGS, "write")) {
+		run_writer();
+		syscall(SYS_EXIT, 0);
+	}
+
+	if (streq(ARGS, "read")) {
+		run_reader();
+		syscall(SYS_EXIT, 0);
+	}
+
 	print("  [prog] loaded from disk, running in ring 3\n");
 
 	/* Check .bss really did arrive zeroed. If the loader forgot, this prints

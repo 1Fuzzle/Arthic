@@ -20,6 +20,8 @@
 #define SYS_EXIT  2    /* never returns */
 #define SYS_SLEEP 3    /* ebx = ticks */
 #define SYS_ID    4    /* returns this task's id */
+#define SYS_PIPE_WRITE 5   /* ebx = buffer, ecx = length */
+#define SYS_PIPE_READ  6   /* ebx = buffer, ecx = max, returns bytes read */
 
 void syscall_install(void);
 
