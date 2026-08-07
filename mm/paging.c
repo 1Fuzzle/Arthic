@@ -280,6 +280,54 @@ int paging_probe_write(volatile uint32_t *addr, uint32_t value)
  * as close to W^X as 32-bit paging permits — no NX bit means user code pages
  * are executable whether we like it or not, but at least they are not writable.
  */
+/* Map a single page, building a page table for its 4 MB region if needed.
+ *
+ * This is where paging stops being a fixed picture of RAM and becomes a thing
+ * you can change: an address that meant nothing a moment ago now refers to a
+ * specific frame, for this address space, until we say otherwise.
+ */
+int paging_map(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags)
+{
+	uint32_t dir_index = virtual_addr >> 22;
+	uint32_t tbl_index = (virtual_addr >> 12) & 0x3FF;
+
+	if (!(page_directory[dir_index] & PAGE_PRESENT)) {
+		uint32_t table_phys = pmm_alloc_frame();
+		if (!table_phys)
+			return 0;
+
+		/* Reachable because all RAM is identity-mapped, so the frame we just
+		 * got can be written at its own physical address. A kernel that did
+		 * not map all of RAM would need a scratch mapping here, and that is
+		 * where recursive page directories come from. */
+		kmemset((void *) table_phys, 0, PAGE_SIZE);
+
+		/* The directory entry must permit at least as much as the pages
+		 * under it - permissions are ANDed across both levels. Grant broadly
+		 * here and be specific per page below. */
+		page_directory[dir_index] = table_phys | PAGE_PRESENT | PAGE_WRITE
+		                            | (flags & PAGE_USER);
+	} else if (flags & PAGE_USER) {
+		page_directory[dir_index] |= PAGE_USER;
+	}
+
+	uint32_t *table = (uint32_t *)(page_directory[dir_index] & 0xFFFFF000);
+	table[tbl_index] = (physical_addr & 0xFFFFF000) | flags;
+
+	__asm__ volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
+	return 1;
+}
+
+void paging_unmap(uint32_t virtual_addr)
+{
+	uint32_t *entry = entry_for(virtual_addr);
+	if (!entry)
+		return;
+
+	*entry = 0;
+	__asm__ volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
+}
+
 void paging_make_user(uint32_t start, uint32_t end, int writable)
 {
 	uint32_t flags = PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);

@@ -52,6 +52,8 @@ drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter
 drivers/ata.c        ATA PIO disk driver, LBA28, polled
 fs/fs.c              ArthicFS - superblock, directory, bitmap, contiguous files
+kernel/loader.c      reads a program off disk, maps it at 0x20000000, runs it in ring 3
+user/prog.c          a user program, built separately into a flat binary
 mm/pmm.c             physical frame allocator, bitmap, driven by multiboot mmap
 mm/paging.c          page directory/tables, all RAM identity-mapped, CR0.WP, page fault handler
 mm/kheap.c           kmalloc/kfree, first-fit, splitting, coalescing, magic guards

@@ -22,6 +22,7 @@
 #include "lock.h"
 #include "fs.h"
 #include "ata.h"
+#include "loader.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -48,6 +49,8 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  tasks         list threads\n");
+	kprintf("  install       write the demo program to the disk\n");
+	kprintf("  run <name>    load a program from disk and run it in ring 3\n");
 	kprintf("  ls            list files\n");
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
@@ -64,9 +67,9 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.7 - a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.8 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Paging, heap, ring 3, scheduler, mutexes, and a filesystem.\n");
+	kprintf("Paging, heap, scheduler, filesystem, and it loads programs.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -397,6 +400,31 @@ static void command_rm(const char *line)
 		kprintf("no such file: %s\n", name);
 }
 
+static void command_install(void)
+{
+	if (!fs_is_mounted()) {
+		kprintf("no filesystem - run 'format' first\n");
+		return;
+	}
+
+	if (loader_install("prog"))
+		kprintf("wrote the demo program to the disk as 'prog'\n");
+	else
+		kprintf("could not write it (already there? try 'rm prog')\n");
+}
+
+static void command_run(const char *line)
+{
+	const char *name = argument_after(line, "run ");
+
+	if (!name) {
+		kprintf("usage: run <name>\n");
+		return;
+	}
+
+	loader_run(name);
+}
+
 static void command_spawn(void)
 {
 	uint32_t id = task_create("demo", demo_thread);
@@ -438,6 +466,10 @@ static void execute(const char *line)
 		command_heaptest();
 	else if (kstrcmp(line, "tasks") == 0)
 		task_list();
+	else if (kstrcmp(line, "install") == 0)
+		command_install();
+	else if (kstartswith(line, "run "))
+		command_run(line);
 	else if (kstrcmp(line, "ls") == 0)
 		fs_list();
 	else if (kstrcmp(line, "df") == 0)

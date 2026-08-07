@@ -38,7 +38,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v1.7\n");
+	terminal_write("Arthic kernel v1.8\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -121,7 +121,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	kprintf("  string       %s\n", "Arthic");
 	kprintf("  character    %c\n", 'A');
 	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 7, 0xB8000u);
+	kprintf("  mixed        %s v%d.%d at 0x%x\n", "kernel", 1, 8, 0xB8000u);
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("\nInterrupts enabled. Keyboard live. Type 'help'.\n\n");

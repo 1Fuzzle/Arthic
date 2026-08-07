@@ -42,4 +42,13 @@ int paging_probe_write(volatile uint32_t *addr, uint32_t value);
 /* Mark a range as accessible from ring 3. */
 void paging_make_user(uint32_t start, uint32_t end, int writable);
 
+/* Map one page of virtual memory onto a physical frame, creating the page
+ * table if that region has none yet. Returns 0 if it could not allocate a
+ * table. */
+int paging_map(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
+
+/* Remove a mapping. The physical frame is not freed - that is the caller's
+ * business, and conflating the two is how you get double frees. */
+void paging_unmap(uint32_t virtual_addr);
+
 #endif
