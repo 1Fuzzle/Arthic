@@ -25,6 +25,9 @@
 #include <stdarg.h>   /* variadic arguments — also freestanding-safe */
 
 #include "gdt.h"      /* our own header — quotes, not angle brackets */
+#include "idt.h"
+#include "io.h"        /* outb / inb now live here, shared with idt.c */
+#include "terminal.h"
 
 /* ---- The screen -----------------------------------------------------------
  * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
@@ -64,41 +67,10 @@ static uint16_t vga_entry(unsigned char ch, uint8_t colour) {
 }
 
 
-/* ---- Talking to hardware: I/O ports ---------------------------------------
- * Up to now the only hardware we have touched is the screen, and we did it by
- * writing to memory at 0xB8000. Most devices are not reachable that way.
- *
- * x86 has a SECOND address space, entirely separate from memory, called the
- * I/O port space. It has its own 65536 addresses and its own two instructions —
- * `out` to write and `in` to read. Port 0x3D4 has nothing whatsoever to do with
- * memory address 0x3D4. They are unrelated worlds that happen to both use
- * numbers.
- *
- * C has no way to express `out`, so we drop into assembly. That is what
- * __asm__ does: it hands the compiler literal instructions to emit.
- *
- * Reading the constraint syntax, which is genuinely ugly:
- *   : : "a"(value), "Nd"(port)   — the empty first slot means no outputs.
- *                                  "a" = put `value` in register al/ax/eax.
- *                                  "Nd" = put `port` in dx, or inline it as a
- *                                  constant if it is small enough.
- *   volatile                     — do not optimise this away or reorder it.
- *                                  The compiler cannot see that it has an
- *                                  effect, because the effect happens outside
- *                                  the CPU entirely.
- *
- * You will write these two functions once and then use them forever. Every
- * driver from here on — keyboard, timer, disk — goes through them.
+/* ---- Talking to hardware --------------------------------------------------
+ * outb and inb have moved to io.h so idt.c can use them too. Read that file
+ * for the explanation of I/O ports and the inline assembly.
  */
-static inline void outb(uint16_t port, uint8_t value) {
-	__asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port) {
-	uint8_t result;
-	__asm__ volatile ("inb %1, %0" : "=a"(result) : "Nd"(port));
-	return result;
-}
 
 /* ---- The hardware cursor --------------------------------------------------
  * The blinking underscore is drawn by the VGA controller itself, not by us.
@@ -400,6 +372,28 @@ void kprintf(const char *fmt, ...) {
 	va_end(args);
 }
 
+/* ---- Timer ----------------------------------------------------------------
+ * IRQ 0 fires roughly 18.2 times a second by default. This handler does the
+ * simplest possible useful thing: count, and say something once a second.
+ *
+ * `volatile` on the counter tells the compiler this variable changes outside
+ * normal program flow. Without it, a loop that only reads `ticks` could be
+ * optimised into reading it once and assuming it never changes — because as
+ * far as the compiler can see, nothing ever writes to it. Any variable shared
+ * between an interrupt handler and normal code needs this.
+ */
+static volatile uint32_t ticks = 0;
+
+static void timer_handler(struct registers *regs) {
+	(void) regs;   /* unused — this silences the -Wextra warning honestly,
+	                * rather than by removing the parameter we may want later */
+	ticks++;
+
+	if (ticks % 18 == 0)
+		kprintf("tick %u  (about %u seconds since boot)\n",
+		        ticks, ticks / 18);
+}
+
 /* ---- Entry point ----------------------------------------------------------
  * boot.s calls this. Note it never returns — an OS kernel has nothing to
  * return to.
@@ -414,7 +408,7 @@ void kernel_main(void) {
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic kernel v0.5\n");
+	terminal_write("Arthic kernel v0.6\n");
 	terminal_write("Booted in 32-bit protected mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
@@ -432,9 +426,11 @@ void kernel_main(void) {
 	/* Replace GRUB's borrowed descriptor table with our own before doing
 	 * anything else. Nothing visible happens — that is the point. */
 	gdt_install();
+	idt_install();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
+	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
 	kprintf("kprintf is alive.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
@@ -447,10 +443,28 @@ void kernel_main(void) {
 	kprintf("  string       %s\n", "Arthic");
 	kprintf("  character    %c\n", 'A');
 	kprintf("  percent      100%%\n");
-	kprintf("  mixed        %s v0.%d at 0x%x\n", "kernel", 4, 0xB8000u);
+	kprintf("  mixed        %s v0.%d at 0x%x\n", "kernel", 6, 0xB8000u);
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
-	kprintf("\narthic> ");
+	kprintf("\nInterrupts enabled. The timer is now driving this system.\n\n");
 
-	/* Fall off the end and boot.s parks the CPU. */
+	irq_install_handler(0, timer_handler);
+
+	/* Want to see the exception handler work? Uncomment this. It divides by
+	 * zero on purpose, which raises exception 0 and halts with a register
+	 * dump. Comment it out again afterwards — it is fatal by design. */
+	/* { volatile int a = 1, b = 0; kprintf("%d", a / b); } */
+
+	/* sti — set interrupt flag. Until this instruction the CPU has been
+	 * ignoring all hardware interrupts. This is the moment Arthic stops
+	 * being a program that runs top to bottom and becomes a system that
+	 * responds to the outside world. */
+	__asm__ volatile ("sti");
+
+	/* Idle forever. hlt stops the CPU until the next interrupt arrives,
+	 * which is why this loop uses no power — unlike a bare while(1), which
+	 * would spin a core at 100% doing nothing. */
+	for (;;)
+		__asm__ volatile ("hlt");
+
 }

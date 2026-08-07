@@ -21,15 +21,21 @@ CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 -f
 echo "assembling boot.s ..."
 gcc -m32 -c boot.s -o boot.o
 
+echo "assembling interrupts.s ..."
+gcc -m32 -c interrupts.s -o interrupts.o
+
 echo "compiling kernel.c ..."
 gcc $CFLAGS -c kernel.c -o kernel.o
 
 echo "compiling gdt.c ..."
 gcc $CFLAGS -c gdt.c -o gdt.o
 
+echo "compiling idt.c ..."
+gcc $CFLAGS -c idt.c -o idt.o
+
 echo "linking arthic.bin ..."
 gcc -m32 -no-pie -Wl,--build-id=none -T linker.ld -o arthic.bin -ffreestanding -nostdlib -O2 \
-    boot.o kernel.o gdt.o
+    boot.o kernel.o gdt.o idt.o interrupts.o
 
 echo
 echo "built: arthic.bin"
