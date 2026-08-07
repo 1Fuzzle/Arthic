@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v1.4
+## Current state - v1.5
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -27,8 +27,9 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   switched by the timer, with finished threads reaped and their stacks returned
 - Sleeping: a task can ask to be skipped until a tick count, so waiting costs
   nothing and an idle system halts instead of spinning
+- Mutexes built on `xchg`, with a demonstration of the race they prevent
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
-  `tasks`, `spawn`, `user`, `wptest`, `echo`, `clear`
+  `tasks`, `spawn`, `racetest`, `locktest`, `user`, `wptest`, `echo`, `clear`
 
 No filesystem yet.
 
@@ -146,9 +147,10 @@ Should be `0`.
 9. ~~TSS and user mode~~ (v1.2) - ring 3 and a validated syscall gate
 10. ~~Scheduler~~ (v1.3) - preemptive round robin over kernel threads
 11. ~~Sleeping~~ (v1.4)
-12. **Next:** locks - a mutex, and the first real look at race conditions
-13. Later: 64-bit long mode, and with it a real NX bit
-14. Later: a filesystem
+12. ~~Mutexes~~ (v1.5)
+13. **Next:** wait queues, so a blocked thread sleeps instead of spinning
+14. Later: 64-bit long mode, and with it a real NX bit
+15. Later: a filesystem
 
 ## Reference
 

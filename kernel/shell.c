@@ -19,6 +19,7 @@
 #include "kheap.h"
 #include "usermode.h"
 #include "task.h"
+#include "lock.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,6 +46,8 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  tasks         list threads\n");
+	kprintf("  racetest      two threads, no lock - watch updates vanish\n");
+	kprintf("  locktest      the same test with a mutex\n");
 	kprintf("  spawn         start a thread that counts to five\n");
 	kprintf("  user          drop to ring 3 and run a user program\n");
 	kprintf("  wptest        try to write to kernel code (should be blocked)\n");
@@ -53,9 +56,9 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic v1.4 - a 32-bit x86 kernel written from scratch.\n");
+	kprintf("Arthic v1.5 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Paging, heap, ring 3 with syscalls, preemptive scheduler.\n");
+	kprintf("Paging, heap, ring 3, scheduler with sleeping, and mutexes.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -178,6 +181,86 @@ static void demo_thread(void)
 	}
 }
 
+/* ---- Race conditions -------------------------------------------------------
+ *
+ * Two threads each add 1 to the same counter, INCREMENTS times. If nothing goes
+ * wrong the total is 2 * INCREMENTS. It will not be.
+ *
+ * The yield in the middle of the update is cheating, and deliberately so. A
+ * real race depends on the timer landing in exactly the wrong microsecond, so
+ * it might show up once in ten thousand runs - impossible to demonstrate and
+ * miserable to debug. Forcing a switch between the read and the write makes the
+ * bug reliable so you can see what it actually is. The bug is real either way;
+ * only its frequency is rigged.
+ */
+#define INCREMENTS 200
+
+static volatile uint32_t shared_counter = 0;
+static volatile uint32_t workers_done   = 0;
+static struct mutex      counter_lock;
+static int               use_lock = 0;
+
+static void counter_thread(void)
+{
+	for (uint32_t i = 0; i < INCREMENTS; i++) {
+		if (use_lock)
+			mutex_lock(&counter_lock);
+
+		/* counter++ written out longhand, which is all it ever was:
+		 * read, modify, write - three steps, interruptible between any two. */
+		uint32_t value = shared_counter;
+		task_yield();                       /* force the worst case */
+		shared_counter = value + 1;
+
+		if (use_lock)
+			mutex_unlock(&counter_lock);
+	}
+
+	workers_done++;
+}
+
+static void run_counter_test(int locked)
+{
+	shared_counter = 0;
+	workers_done   = 0;
+	use_lock       = locked;
+	mutex_init(&counter_lock);
+
+	kprintf("two threads, %u increments each, %s\n",
+	        (uint32_t) INCREMENTS, locked ? "WITH a mutex" : "with NO lock");
+
+	if (!task_create("count", counter_thread) ||
+	    !task_create("count", counter_thread)) {
+		kprintf("could not create threads\n");
+		return;
+	}
+
+	while (workers_done < 2)
+		task_yield();
+
+	uint32_t expected = 2 * INCREMENTS;
+
+	kprintf("expected %u, got %u", expected, shared_counter);
+
+	if (shared_counter == expected)
+		kprintf("  - correct\n");
+	else
+		kprintf("  - LOST %u updates\n", expected - shared_counter);
+
+	if (locked)
+		kprintf("lock was contended %u times\n", counter_lock.contended);
+}
+
+static void command_racetest(void)
+{
+	run_counter_test(0);
+}
+
+static void command_locktest(void)
+{
+	run_counter_test(1);
+}
+
 static void command_spawn(void)
 {
 	uint32_t id = task_create("demo", demo_thread);
@@ -219,6 +302,10 @@ static void execute(const char *line)
 		command_heaptest();
 	else if (kstrcmp(line, "tasks") == 0)
 		task_list();
+	else if (kstrcmp(line, "racetest") == 0)
+		command_racetest();
+	else if (kstrcmp(line, "locktest") == 0)
+		command_locktest();
 	else if (kstrcmp(line, "spawn") == 0)
 		command_spawn();
 	else if (kstrcmp(line, "user") == 0)
