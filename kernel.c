@@ -1,0 +1,165 @@
+/* kernel.c — Arthic
+ *
+ * This is freestanding C. That word matters: normally C programs sit on top of
+ * an operating system that provides printf, malloc, files, and so on. Here we
+ * ARE the operating system, so none of that exists. There is no stdio.h. If we
+ * want to put a character on the screen, we have to write to the hardware
+ * ourselves.
+ *
+ * What we get instead is: the C language itself, and raw memory.
+ */
+
+/* ---- Types ----------------------------------------------------------------
+ * stdint.h and stddef.h are two of the very few headers that are safe here,
+ * because they contain no code at all — only type definitions.
+ *
+ *   uint8_t   = unsigned integer, exactly 8 bits   (0 to 255)
+ *   uint16_t  = unsigned integer, exactly 16 bits  (0 to 65535)
+ *   size_t    = the type used for sizes and counts
+ *
+ * In OS work you use these instead of int/char because you are describing
+ * hardware layouts, and "exactly 16 bits" is a promise plain `int` won't make.
+ */
+#include <stdint.h>
+#include <stddef.h>
+
+/* ---- The screen -----------------------------------------------------------
+ * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
+ * That grid is not accessed through a function — it is just MEMORY, sitting at
+ * address 0xB8000. Write bytes there and characters appear on screen. That is
+ * the entire mechanism.
+ *
+ * Each cell is 2 bytes:
+ *     low byte  = the character code
+ *     high byte = the colour (low 4 bits foreground, high 4 bits background)
+ */
+static const size_t VGA_WIDTH  = 80;
+static const size_t VGA_HEIGHT = 25;
+
+/* VGA's 16 available colours, in the order the hardware numbers them. */
+enum vga_colour {
+	VGA_BLACK = 0,  VGA_BLUE = 1,       VGA_GREEN = 2,       VGA_CYAN = 3,
+	VGA_RED = 4,    VGA_MAGENTA = 5,    VGA_BROWN = 6,       VGA_LIGHT_GREY = 7,
+	VGA_DARK_GREY = 8, VGA_LIGHT_BLUE = 9, VGA_LIGHT_GREEN = 10, VGA_LIGHT_CYAN = 11,
+	VGA_LIGHT_RED = 12, VGA_PINK = 13,  VGA_YELLOW = 14,     VGA_WHITE = 15,
+};
+
+/* Pack a foreground and background colour into the single byte VGA wants.
+ *
+ * `bg << 4` shifts the background colour left by 4 bits, moving it into the
+ * upper half of the byte. Then `|` merges the two halves together. Bit
+ * shifting like this is everywhere in systems code — hardware packs several
+ * fields into one byte and you assemble them by hand.
+ */
+static uint8_t vga_entry_colour(enum vga_colour fg, enum vga_colour bg) {
+	return fg | (bg << 4);
+}
+
+/* Pack a character and its colour into the 16-bit value one cell holds. */
+static uint16_t vga_entry(unsigned char ch, uint8_t colour) {
+	return (uint16_t) ch | ((uint16_t) colour << 8);
+}
+
+/* ---- Terminal state ------------------------------------------------------- */
+static size_t    terminal_row;
+static size_t    terminal_column;
+static uint8_t   terminal_colour;
+static uint16_t *terminal_buffer;   /* <-- a POINTER. See the note below.     */
+
+/*
+ * POINTERS, the one idea to actually stop and absorb.
+ *
+ * `uint16_t *terminal_buffer` does not hold a character. It holds an ADDRESS —
+ * a number saying where in memory something lives. Below we set it to 0xB8000,
+ * meaning "the screen starts there". Writing terminal_buffer[5] = x means
+ * "go to that address, step forward 5 cells, put x there".
+ *
+ * The reason C is the language of operating systems is exactly this: it lets
+ * you say "treat address 0xB8000 as an array of 16-bit values" and then just
+ * do it. Higher-level languages deliberately prevent that. Here it is the
+ * whole job.
+ */
+
+void terminal_initialise(void) {
+	terminal_row    = 0;
+	terminal_column = 0;
+	terminal_colour = vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK);
+	terminal_buffer = (uint16_t *) 0xB8000;
+
+	/* Blank every cell. Nothing clears the screen for us. */
+	for (size_t y = 0; y < VGA_HEIGHT; y++) {
+		for (size_t x = 0; x < VGA_WIDTH; x++) {
+			/* The screen is a 2D grid but memory is a 1D line, so we flatten
+			 * the coordinates: row y, column x lives at y * WIDTH + x.       */
+			terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_colour);
+		}
+	}
+}
+
+void terminal_set_colour(uint8_t colour) {
+	terminal_colour = colour;
+}
+
+/* Put one character at an exact position. */
+static void terminal_put_at(char ch, uint8_t colour, size_t x, size_t y) {
+	terminal_buffer[y * VGA_WIDTH + x] = vga_entry(ch, colour);
+}
+
+/* Put one character at the cursor, handling newlines and wrapping ourselves.
+ * Note that '\n' is not magic — on a real machine it is just the byte 10, and
+ * it only means "new line" because code like this decides it does.
+ */
+void terminal_putchar(char ch) {
+	if (ch == '\n') {
+		terminal_column = 0;
+		terminal_row++;
+	} else {
+		terminal_put_at(ch, terminal_colour, terminal_column, terminal_row);
+		if (++terminal_column == VGA_WIDTH) {
+			terminal_column = 0;
+			terminal_row++;
+		}
+	}
+
+	/* We have no scrolling yet, so at the bottom we wrap to the top.
+	 * Scrolling is a good early thing to add — see the README.              */
+	if (terminal_row == VGA_HEIGHT)
+		terminal_row = 0;
+}
+
+/* Write a string.
+ *
+ * In C a string is not an object with a length attached. It is just a run of
+ * bytes in memory that ends with a zero byte, and `const char *str` is the
+ * address of the first one. So "walk forward until you hit 0" is genuinely how
+ * you find the end. This is the source of a great many real-world security
+ * bugs, and you are seeing the reason for them directly.
+ */
+void terminal_write(const char *str) {
+	for (size_t i = 0; str[i] != '\0'; i++)
+		terminal_putchar(str[i]);
+}
+
+/* ---- Entry point ----------------------------------------------------------
+ * boot.s calls this. Note it never returns — an OS kernel has nothing to
+ * return to.
+ */
+void kernel_main(void) {
+	terminal_initialise();
+
+	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
+	terminal_write("  _   _   _   _   _   _\n");
+	terminal_write(" / \\ / \\ / \\ / \\ / \\ / \\\n");
+	terminal_write("( A | r | t | h | i | c )\n");
+	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
+
+	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
+	terminal_write("Arthic kernel v0.1\n");
+	terminal_write("Booted in 32-bit protected mode.\n\n");
+
+	terminal_set_colour(vga_entry_colour(VGA_DARK_GREY, VGA_BLACK));
+	terminal_write("No scheduler. No memory manager. No drivers.\n");
+	terminal_write("Just this. Everything else is yours to add.\n");
+
+	/* Fall off the end and boot.s parks the CPU. */
+}
