@@ -47,6 +47,7 @@ kernel/usermode.c    ring 3 entry/exit, demo user program in .usertext
 kernel/task.c        kernel threads, round-robin scheduler, sleeping, reaping
 kernel/switch.s      context switch - callee-saved registers plus the stack pointer
 kernel/lock.c        mutex on atomic_xchg, FIFO wait queue, waiters block
+kernel/pipe.c        bounded ring buffer, blocks readers when empty and writers when full
 drivers/terminal.c   VGA text, scrolling, hardware cursor, kprintf
 drivers/keyboard.c   PS/2 scancode set 1, Shift + Caps Lock
 drivers/timer.c      PIT tick counter

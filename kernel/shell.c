@@ -23,6 +23,7 @@
 #include "fs.h"
 #include "ata.h"
 #include "loader.h"
+#include "pipe.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -49,6 +50,9 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  tasks         list threads\n");
+	kprintf("  kill <id>     terminate a task\n");
+	kprintf("  pipetest      a producer and consumer sharing a pipe\n");
+	kprintf("  pipestat      pipe contents and how often each side blocked\n");
 	kprintf("  install       write the demo program to the disk\n");
 	kprintf("  run <name>    load a program - it runs as its own process\n");
 	kprintf("  ls            list files\n");
@@ -69,7 +73,7 @@ static void command_about(void)
 {
 	kprintf("Arthic v1.8 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Processes: each program gets its own address space.\n");
+	kprintf("Processes with their own address spaces, pipes between tasks.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -425,6 +429,124 @@ static void command_run(const char *line)
 	loader_run(name);
 }
 
+/* ---- Pipes -----------------------------------------------------------------
+ *
+ * A producer that writes faster than the consumer reads. The pipe holds 256
+ * bytes; the producer sends far more than that, so it is forced to wait -
+ * which is the whole point. Watch the blocked-write count afterwards.
+ */
+static struct pipe demo_pipe;
+static volatile int pipe_running = 0;
+
+static void producer_thread(void)
+{
+	char message[] = "message 00 from the producer\n";
+
+	for (int i = 1; i <= 40; i++) {
+		message[8]  = (char)('0' + (i / 10) % 10);
+		message[9]  = (char)('0' + i % 10);
+
+		uint32_t length = 0;
+		while (message[length])
+			length++;
+
+		pipe_write(&demo_pipe, message, length);
+	}
+
+	pipe_write(&demo_pipe, "END", 3);
+	pipe_running--;
+}
+
+static void consumer_thread(void)
+{
+	char chunk[64];
+
+	for (;;) {
+		uint32_t got = pipe_read(&demo_pipe, chunk, sizeof(chunk) - 1);
+		chunk[got] = '\0';
+
+		/* Deliberately slower than the producer, so the pipe fills up and the
+		 * producer has to wait. */
+		task_sleep(2);
+
+		int done = 0;
+		for (uint32_t i = 0; i + 2 < got; i++) {
+			if (chunk[i] == 'E' && chunk[i+1] == 'N' && chunk[i+2] == 'D')
+				done = 1;
+		}
+
+		kprintf("%s", chunk);
+
+		if (done)
+			break;
+	}
+
+	pipe_running--;
+}
+
+static void command_pipetest(void)
+{
+	if (pipe_running) {
+		kprintf("a pipe test is already running\n");
+		return;
+	}
+
+	pipe_init(&demo_pipe);
+	pipe_running = 2;
+
+	kprintf("producer sends 40 messages through a %u byte pipe\n",
+	        (uint32_t) PIPE_CAPACITY);
+
+	if (!task_create("producer", producer_thread) ||
+	    !task_create("consumer", consumer_thread)) {
+		kprintf("could not create the threads\n");
+		pipe_running = 0;
+		return;
+	}
+}
+
+static void command_pipestat(void)
+{
+	uint32_t reads, writes;
+	pipe_stats(&demo_pipe, &reads, &writes);
+
+	kprintf("  %u bytes waiting in the pipe\n", pipe_available(&demo_pipe));
+	kprintf("  reader blocked %u times, writer blocked %u times\n",
+	        reads, writes);
+}
+
+/* Parse a small unsigned number. No strtoul out here either. */
+static uint32_t parse_number(const char *s)
+{
+	uint32_t value = 0;
+
+	while (*s >= '0' && *s <= '9') {
+		value = value * 10 + (uint32_t)(*s - '0');
+		s++;
+	}
+	return value;
+}
+
+static void command_kill(const char *line)
+{
+	const char *arg = argument_after(line, "kill ");
+
+	if (!arg) {
+		kprintf("usage: kill <id>   (see 'tasks')\n");
+		return;
+	}
+
+	uint32_t id = parse_number(arg);
+	int result = task_kill(id);
+
+	if (result == 1)
+		kprintf("killed task %u\n", id);
+	else if (result == -1)
+		kprintf("task %u is blocked on something and cannot be killed yet\n", id);
+	else
+		kprintf("no such task, or it is task 0\n");
+}
+
 static void command_spawn(void)
 {
 	uint32_t id = task_create("demo", demo_thread);
@@ -482,6 +604,12 @@ static void execute(const char *line)
 		command_cat(line);
 	else if (kstartswith(line, "rm "))
 		command_rm(line);
+	else if (kstartswith(line, "kill "))
+		command_kill(line);
+	else if (kstrcmp(line, "pipetest") == 0)
+		command_pipetest();
+	else if (kstrcmp(line, "pipestat") == 0)
+		command_pipestat();
 	else if (kstrcmp(line, "racetest") == 0)
 		command_racetest();
 	else if (kstrcmp(line, "locktest") == 0)

@@ -116,6 +116,11 @@ void task_sleep(uint32_t ticks);
 void task_block(void);
 void task_unblock(struct task *t);
 
+/* Kill a task by id. Returns 0 if there is no such task, if it is task 0, or
+ * if it is currently blocked - see the comment in task_kill for why that last
+ * one is refused rather than forced. */
+int task_kill(uint32_t id);
+
 /* Save the interrupt flag and disable interrupts; restore it later. Returned
  * value must be treated as opaque. */
 uint32_t irq_save(void);

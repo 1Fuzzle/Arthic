@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v2.0
+## Current state - v2.1
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -41,9 +41,13 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - **Processes**: each loaded program gets its own page directory and its own
   task, so several can be resident at once - all mapped at 0x20000000, in
   different physical memory, none able to see the others
+- Pipes: a bounded ring buffer with blocking on both sides, so a fast producer
+  is made to wait rather than dropping data or growing without limit
+- `kill` - terminate a running task from the shell
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
-  `format`, `install`, `run`, `user`, `wptest`, `echo`, `clear`
+  `format`, `install`, `run`, `kill`, `pipetest`, `pipestat`, `user`, `wptest`,
+  `echo`, `clear`
 
 No filesystem yet.
 
@@ -176,7 +180,19 @@ Should be `0`.
 15. ~~Loading a program from disk~~ (v1.8)
 16. ~~ELF loading~~ (v1.9)
 17. ~~Processes with separate address spaces~~ (v2.0)
-18. **Next:** a `ps`-style view and a way to kill a running program
+18. ~~kill, and pipes~~ (v2.1)
+19. **Next:** exposing pipes to ring 3, so two programs can talk
+20. Later: block-mapped files, so a file need not be contiguous and can grow
+21. Later: 64-bit long mode, and with it a real NX bit
+
+### A known limitation
+
+`kill` refuses a task that is BLOCKED. A blocked task is linked into some wait
+queue by a pointer that queue owns, and freeing it would leave that queue
+following a dangling pointer. Doing it properly means every wait queue can have
+members removed from underneath it - Linux uses a signal that wakes the task so
+it can unwind and remove itself. That is a project of its own, not a missing
+line.
 18. Later: block-mapped files, so a file need not be contiguous and can grow
 19. Later: 64-bit long mode, and with it a real NX bit
 

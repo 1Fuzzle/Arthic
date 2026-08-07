@@ -326,6 +326,52 @@ void task_unblock(struct task *t)
 		t->state = TASK_READY;
 }
 
+int task_kill(uint32_t id)
+{
+	/* Task 0 is the fallback when nothing else can run. Killing it would
+	 * leave the scheduler with nowhere to go. */
+	if (id == 0)
+		return 0;
+
+	uint32_t flags = irq_save();
+
+	struct task *t = task_by_id(id);
+
+	if (!t || t->state == TASK_FINISHED) {
+		irq_restore(flags);
+		return 0;
+	}
+
+	/* Refusing to kill a BLOCKED task is a real limitation, stated plainly
+	 * rather than papered over.
+	 *
+	 * A blocked task is sitting on some wait queue - a mutex, a pipe - linked
+	 * in by a pointer that queue owns. Marking it finished would let the
+	 * reaper free it while that queue still points at it, and the next wakeup
+	 * would follow a dangling pointer into freed memory.
+	 *
+	 * Doing this properly means every wait queue being able to have members
+	 * removed from underneath it, which is a real design decision rather than
+	 * a missing line of code. Linux solves it with a signal that wakes the
+	 * task so it can unwind and remove itself. That is the right shape, and
+	 * it is a project of its own.
+	 */
+	if (t->state == TASK_BLOCKED) {
+		irq_restore(flags);
+		return -1;
+	}
+
+	t->state = TASK_FINISHED;
+
+	irq_restore(flags);
+
+	/* Killing yourself is allowed, it just never returns. */
+	if (t == current)
+		task_terminate();
+
+	return 1;
+}
+
 void task_set_address_space(uint32_t page_dir_phys)
 {
 	if (!current)
