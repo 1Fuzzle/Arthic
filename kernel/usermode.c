@@ -37,6 +37,7 @@
 #include "gdt.h"
 #include "tss.h"
 #include "terminal.h"
+#include "task.h"
 
 /* From linker.ld — the section holding code ring 3 may execute. */
 extern uint32_t user_text_start;

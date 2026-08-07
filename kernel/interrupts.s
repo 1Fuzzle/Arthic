@@ -205,16 +205,21 @@ idt_flush:
 
 /* --- entering and leaving ring 3 -------------------------------------------
  * This lives in assembly rather than inline asm because it deliberately
- * abandons and restores the stack, and the compiler cannot be told that. An
- * earlier inline version worked once and then looped forever, because GCC was
- * free to place the resume label wherever it liked relative to the iret.
+ * abandons and restores the stack, and the compiler cannot be told that.
  *
- * When the boundary IS the stack, the code that crosses it belongs here.
+ * `current_uctx` points at the running task's two-word save area, and the
+ * scheduler updates it on every switch. It has to be per-task rather than one
+ * fixed location: two tasks can each be in ring 3 with only one of them
+ * actually executing, and "where do I resume" belongs to the task.
+ *
+ * A pointer kept current by the scheduler is simpler than threading the
+ * address through every call site, and it cannot go stale - the only thing
+ * that changes which task is running is the scheduler itself.
  */
 .section .bss
 .align 4
-kernel_saved_esp: .skip 4
-kernel_saved_ebp: .skip 4
+.global current_uctx
+current_uctx: .skip 4
 
 .section .text
 
@@ -225,13 +230,14 @@ kernel_saved_ebp: .skip 4
  */
 .global usermode_jump
 usermode_jump:
-	/* esp still points at our return address — no pushes yet. Saving it now
+	/* esp still points at our return address - no pushes yet. Saving it now
 	 * means usermode_return can `ret` straight to our caller. */
-	mov %esp, kernel_saved_esp
-	mov %ebp, kernel_saved_ebp
+	mov current_uctx, %eax
+	mov %esp, 0(%eax)
+	mov %ebp, 4(%eax)
 
-	mov 4(%esp), %ecx        /* entry point   */
-	mov 8(%esp), %edx        /* user stack    */
+	mov 4(%esp), %ecx        /* entry point */
+	mov 8(%esp), %edx        /* user stack  */
 
 	cli
 
@@ -253,14 +259,15 @@ usermode_jump:
 
 /* void usermode_return(void);
  *
- * Called from the SYS_EXIT handler, on the kernel stack the TSS supplied.
- * Throws that stack away and continues on the one usermode_jump was using.
+ * Called on the kernel stack the TSS supplied. Throws that stack away and
+ * continues on the one usermode_jump was using.
  */
 .global usermode_return
 usermode_return:
 	cli
-	mov kernel_saved_esp, %esp
-	mov kernel_saved_ebp, %ebp
+	mov current_uctx, %eax
+	mov 0(%eax), %esp
+	mov 4(%eax), %ebp
 
 	mov $0x10, %ax           /* back to kernel data selectors */
 	mov %ax, %ds

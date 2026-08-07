@@ -57,7 +57,6 @@ extern void usermode_jump(uint32_t entry, uint32_t user_stack_top);
 
 #define MAX_PROGRAM (64 * 1024)
 
-static uint32_t stack_base = 0;
 
 int loader_install(const char *name)
 {
@@ -82,19 +81,32 @@ static uint32_t flags_for_segment(uint32_t elf_flags)
 	return flags;
 }
 
-/* Record of what we mapped, so it can all be undone afterwards. */
+/* Record of what one running program owns, so it can all be undone when it
+ * exits. One of these per program rather than a set of globals - two programs
+ * are loaded at the same addresses and must not share bookkeeping. */
 #define MAX_SEGMENTS 8
 
-static struct {
-	uint32_t vaddr;
-	uint32_t phys;
-	uint32_t pages;
-} loaded[MAX_SEGMENTS];
+struct program {
+	uint32_t page_dir;
+	uint32_t entry;
 
-static uint32_t loaded_count = 0;
+	struct {
+		uint32_t vaddr;
+		uint32_t phys;
+		uint32_t pages;
+	} segment[MAX_SEGMENTS];
 
-static int load_segment(const uint8_t *file, uint32_t file_size,
-                        const struct elf_program_header *ph)
+	uint32_t segments;
+	uint32_t stack_phys;
+	char     name[32];
+	int      in_use;
+};
+
+#define MAX_PROGRAMS 4
+static struct program programs[MAX_PROGRAMS];
+
+static int load_segment(struct program *prog, const uint8_t *file,
+                        uint32_t file_size, const struct elf_program_header *ph)
 {
 	/* The segment may start partway into a page. Round the address down and
 	 * account for the offset, or the copy lands in the wrong place. */
@@ -102,7 +114,7 @@ static int load_segment(const uint8_t *file, uint32_t file_size,
 	uint32_t within     = ph->vaddr - page_start;
 	uint32_t pages      = (within + ph->memsz + PAGE_SIZE - 1) / PAGE_SIZE;
 
-	if (pages == 0 || loaded_count >= MAX_SEGMENTS)
+	if (pages == 0 || prog->segments >= MAX_SEGMENTS)
 		return 0;
 
 	/* Untrusted input. A header claiming a huge filesz, or an offset past the
@@ -139,10 +151,10 @@ static int load_segment(const uint8_t *file, uint32_t file_size,
 		}
 	}
 
-	loaded[loaded_count].vaddr = page_start;
-	loaded[loaded_count].phys  = phys;
-	loaded[loaded_count].pages = pages;
-	loaded_count++;
+	prog->segment[prog->segments].vaddr = page_start;
+	prog->segment[prog->segments].phys  = phys;
+	prog->segment[prog->segments].pages = pages;
+	prog->segments++;
 
 	kprintf("  segment at 0x%x  %u bytes in file, %u in memory  %s%s\n",
 	        ph->vaddr, ph->filesz, ph->memsz,
@@ -152,42 +164,92 @@ static int load_segment(const uint8_t *file, uint32_t file_size,
 	return 1;
 }
 
-static void unload(void)
+static void unload(struct program *prog)
 {
-	for (uint32_t i = 0; i < loaded_count; i++) {
-		for (uint32_t p = 0; p < loaded[i].pages; p++)
-			paging_unmap(loaded[i].vaddr + p * PAGE_SIZE);
-
-		for (uint32_t p = 0; p < loaded[i].pages; p++)
-			pmm_free_frame(loaded[i].phys + p * PAGE_SIZE);
+	for (uint32_t i = 0; i < prog->segments; i++) {
+		for (uint32_t p = 0; p < prog->segment[i].pages; p++)
+			pmm_free_frame(prog->segment[i].phys + p * PAGE_SIZE);
 	}
-	loaded_count = 0;
+	prog->segments = 0;
 
-	if (stack_base) {
+	if (prog->stack_phys) {
 		uint32_t pages = USER_STACK_SIZE / PAGE_SIZE;
-		uint32_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
-
 		for (uint32_t i = 0; i < pages; i++)
-			paging_unmap(stack_bottom + i * PAGE_SIZE);
-
-		for (uint32_t i = 0; i < pages; i++)
-			pmm_free_frame(stack_base + i * PAGE_SIZE);
-
-		stack_base = 0;
+			pmm_free_frame(prog->stack_phys + i * PAGE_SIZE);
+		prog->stack_phys = 0;
 	}
+
+	/* Destroying the address space frees the page tables it added. There is
+	 * no need to unmap anything first - the mappings only ever existed inside
+	 * this directory, and it is about to stop existing. That is the quiet
+	 * advantage of per-process address spaces: teardown is one operation
+	 * rather than a careful walk. */
+	if (prog->page_dir) {
+		paging_destroy_address_space(prog->page_dir);
+		prog->page_dir = 0;
+	}
+
+	prog->in_use = 0;
+}
+
+/* The body of a program task: build the address space, load the file into it,
+ * drop to ring 3, and clean up on the way out. */
+/* Called by the reaper once this program's task is off the run queue. */
+static void program_cleanup(void *arg)
+{
+	struct program *prog = (struct program *) arg;
+	if (prog)
+		unload(prog);
+}
+
+static void program_task(void)
+{
+	struct task *self = task_current();
+	struct program *prog = self ? (struct program *) self->arg : 0;
+
+	if (!prog) {
+		kprintf("loader: task started with no program attached\n");
+		return;
+	}
+
+	/* The scheduler keeps the TSS pointed at this task's kernel stack, so
+	 * there is nothing to set here. */
+	syscall_set_user_range(USER_LOAD_ADDR, USER_STACK_TOP);
+
+	/* Does not return. The program leaves ring 3 by exiting or by faulting,
+	 * and either way the kernel kills the task rather than unwinding back
+	 * through this function - see task_terminate. Cleanup happens in
+	 * program_cleanup once the task is off the run queue. */
+	usermode_jump(prog->entry, USER_STACK_TOP - 16);
 }
 
 int loader_run(const char *name)
 {
-	uint32_t size = 0;
+	struct program *prog = 0;
 
+	for (uint32_t i = 0; i < MAX_PROGRAMS; i++) {
+		if (!programs[i].in_use) {
+			prog = &programs[i];
+			break;
+		}
+	}
+
+	if (!prog) {
+		kprintf("loader: too many programs running\n");
+		return 0;
+	}
+
+	kmemset(prog, 0, sizeof(*prog));
+
+	uint32_t size = 0;
 	uint8_t *file = (uint8_t *) kmalloc(MAX_PROGRAM);
 	if (!file) {
 		kprintf("loader: out of heap\n");
 		return 0;
 	}
 
-	if (!fs_read(name, file, MAX_PROGRAM, &size) || size < sizeof(struct elf_header)) {
+	if (!fs_read(name, file, MAX_PROGRAM, &size) ||
+	    size < sizeof(struct elf_header)) {
 		kprintf("loader: cannot read %s\n", name);
 		kfree(file);
 		return 0;
@@ -215,10 +277,18 @@ int loader_run(const char *name)
 		return 0;
 	}
 
-	kprintf("loader: %s, %u bytes, entry 0x%x, %u segments\n",
-	        name, size, elf->entry, (uint32_t) elf->phnum);
+	/* A private address space, then switch to it so the mapping calls below
+	 * apply there rather than to the kernel's. Safe because the kernel is
+	 * mapped identically in both. */
+	prog->page_dir = paging_create_address_space();
+	if (!prog->page_dir) {
+		kprintf("loader: no memory for an address space\n");
+		kfree(file);
+		return 0;
+	}
 
-	loaded_count = 0;
+	uint32_t saved = paging_kernel_directory();
+	paging_switch(prog->page_dir);
 
 	for (uint32_t i = 0; i < elf->phnum; i++) {
 		const struct elf_program_header *ph =
@@ -226,11 +296,12 @@ int loader_run(const char *name)
 			(file + elf->phoff + i * elf->phentsize);
 
 		if (ph->type != PT_LOAD)
-			continue;                  /* not our business */
+			continue;
 
-		if (!load_segment(file, size, ph)) {
+		if (!load_segment(prog, file, size, ph)) {
 			kprintf("loader: bad or unloadable segment %u\n", i);
-			unload();
+			paging_switch(saved);
+			unload(prog);
 			kfree(file);
 			return 0;
 		}
@@ -238,40 +309,54 @@ int loader_run(const char *name)
 
 	kfree(file);
 
-	if (loaded_count == 0) {
+	if (prog->segments == 0) {
 		kprintf("loader: nothing to load\n");
+		paging_switch(saved);
+		unload(prog);
 		return 0;
 	}
 
 	uint32_t stack_pages = USER_STACK_SIZE / PAGE_SIZE;
-	stack_base = pmm_alloc_frames(stack_pages);
-	if (!stack_base) {
+	prog->stack_phys = pmm_alloc_frames(stack_pages);
+	if (!prog->stack_phys) {
 		kprintf("loader: no memory for the stack\n");
-		unload();
+		paging_switch(saved);
+		unload(prog);
 		return 0;
 	}
-	kmemset((void *) stack_base, 0, USER_STACK_SIZE);
+	kmemset((void *) prog->stack_phys, 0, USER_STACK_SIZE);
 
 	uint32_t stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;
 	for (uint32_t i = 0; i < stack_pages; i++) {
 		if (!paging_map(stack_bottom + i * PAGE_SIZE,
-		                stack_base + i * PAGE_SIZE,
+		                prog->stack_phys + i * PAGE_SIZE,
 		                PAGE_PRESENT | PAGE_USER | PAGE_WRITE)) {
 			kprintf("loader: could not map the stack\n");
-			unload();
+			paging_switch(saved);
+			unload(prog);
 			return 0;
 		}
 	}
 
-	syscall_set_user_range(USER_LOAD_ADDR, USER_STACK_TOP);
+	paging_switch(saved);
 
-	uint32_t kernel_stack;
-	__asm__ volatile ("mov %%esp, %0" : "=r" (kernel_stack));
-	tss_set_kernel_stack(kernel_stack - 256);
+	prog->entry  = elf->entry;
+	prog->in_use = 1;
 
-	/* The entry point comes from the file, not from an assumption. */
-	usermode_jump(elf->entry, USER_STACK_TOP - 16);
+	kprintf("loader: %s, %u bytes, entry 0x%x, %u segments, own address space\n",
+	        name, size, elf->entry, prog->segments);
 
-	unload();
+	/* The program becomes a task. The shell keeps running, and two programs
+	 * can be resident at once - both mapped at 0x20000000, in different
+	 * physical memory, neither able to see the other. */
+	/* Everything the task needs is passed in, because it may be scheduled
+	 * before this function returns. */
+	if (!task_create_ex("prog", program_task, prog->page_dir, prog,
+	                    program_cleanup)) {
+		kprintf("loader: could not create a task for it\n");
+		unload(prog);
+		return 0;
+	}
+
 	return 1;
 }

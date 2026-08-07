@@ -18,6 +18,8 @@
 #define SYS_WRITE 0    /* ebx = pointer to string */
 #define SYS_TICKS 1    /* returns tick count in eax */
 #define SYS_EXIT  2    /* never returns */
+#define SYS_SLEEP 3    /* ebx = ticks */
+#define SYS_ID    4    /* returns this task's id */
 
 void syscall_install(void);
 

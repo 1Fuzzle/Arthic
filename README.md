@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v1.9
+## Current state - v2.0
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -38,6 +38,9 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   permissions (code read-only, data writable), zeroes `.bss` rather than storing
   it, and takes the entry point from the file
 - A ring 3 fault kills the program, not the kernel
+- **Processes**: each loaded program gets its own page directory and its own
+  task, so several can be resident at once - all mapped at 0x20000000, in
+  different physical memory, none able to see the others
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
   `format`, `install`, `run`, `user`, `wptest`, `echo`, `clear`
@@ -172,8 +175,8 @@ Should be `0`.
 14. ~~Filesystem~~ (v1.7)
 15. ~~Loading a program from disk~~ (v1.8)
 16. ~~ELF loading~~ (v1.9)
-17. **Next:** more than one program at once - a task per program, each with its
-    own page directory
+17. ~~Processes with separate address spaces~~ (v2.0)
+18. **Next:** a `ps`-style view and a way to kill a running program
 18. Later: block-mapped files, so a file need not be contiguous and can grow
 19. Later: 64-bit long mode, and with it a real NX bit
 

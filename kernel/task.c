@@ -33,6 +33,8 @@
 #include "string.h"
 #include "terminal.h"
 #include "timer.h"
+#include "paging.h"
+#include "tss.h"
 
 #define STACK_FRAMES 2   /* 8 KB per thread */
 
@@ -43,6 +45,10 @@ static struct task *task_ring = 0;   /* circular list */
 static uint32_t     next_id  = 0;
 static int          enabled  = 0;
 static uint32_t     switches = 0;
+
+/* Read by usermode_jump and usermode_return in interrupts.s. Kept pointing at
+ * the running task's save area. */
+extern uint32_t *current_uctx;
 
 static void copy_name(char *dest, const char *src)
 {
@@ -65,6 +71,14 @@ void task_init(void)
 	kmemset(t, 0, sizeof(*t));
 
 	copy_name(t->name, "kernel");
+
+	/* Task 0 runs on the stack boot.s set up. We do not know its top exactly,
+	 * so take the current pointer with headroom - it only matters that an
+	 * interrupt from ring 3 lands somewhere this task owns. */
+	uint32_t esp_now;
+	__asm__ volatile ("mov %%esp, %0" : "=r" (esp_now));
+	t->kernel_stack_top = esp_now - 256;
+
 	t->id    = next_id++;
 	t->state = TASK_RUNNING;
 	t->next  = t;                 /* a ring of one */
@@ -75,9 +89,18 @@ void task_init(void)
 	current   = t;
 	task_ring = t;
 	enabled   = 1;
+
+	current_uctx = t->uctx;
 }
 
 uint32_t task_create(const char *name, void (*entry)(void))
+{
+	return task_create_ex(name, entry, 0, 0, 0);
+}
+
+uint32_t task_create_ex(const char *name, void (*entry)(void),
+                        uint32_t page_dir, void *arg,
+                        void (*on_exit)(void *arg))
 {
 	if (!enabled)
 		return 0;
@@ -109,9 +132,13 @@ uint32_t task_create(const char *name, void (*entry)(void))
 	*(--sp) = 0;                      /* edi */
 	*(--sp) = 0;                      /* ebp */
 
-	t->esp   = (uint32_t) sp;
-	t->id    = next_id++;
-	t->state = TASK_READY;
+	t->esp              = (uint32_t) sp;
+	t->kernel_stack_top = stack + STACK_FRAMES * PAGE_SIZE;
+	t->id       = next_id++;
+	t->state    = TASK_READY;
+	t->page_dir = page_dir;
+	t->arg      = arg;
+	t->on_exit  = on_exit;
 	copy_name(t->name, name);
 
 	/* Splice into the ring, immediately after the current task. Inserting
@@ -130,6 +157,11 @@ uint32_t task_create(const char *name, void (*entry)(void))
 static void reap(struct task *prev, struct task *dead)
 {
 	prev->next = dead->next;
+
+	/* Off the run queue, so it can never be scheduled again - only now is it
+	 * safe to release what it owned. */
+	if (dead->on_exit)
+		dead->on_exit(dead->arg);
 
 	for (uint32_t i = 0; i < dead->stack_frames; i++)
 		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
@@ -216,6 +248,35 @@ void task_schedule(void)
 	current     = next;
 	switches++;
 
+	/* Switch the address space before the stack.
+	 *
+	 * Safe only because every address space contains an identical copy of the
+	 * kernel mappings - the code executing right now, and the stacks on both
+	 * sides of the switch, live at addresses that mean the same thing in
+	 * either directory. If that were not true, the instruction after the CR3
+	 * load would be fetched from somewhere unexpected and the machine would
+	 * be gone.
+	 *
+	 * This is the reason kernels map themselves into every process. It looks
+	 * wasteful until you try to do without it. */
+	if (next->page_dir != prev->page_dir)
+		paging_switch(next->page_dir);
+
+	/* Point the TSS at the incoming task's kernel stack.
+	 *
+	 * There is one TSS and one esp0 field, but every task needs its own
+	 * kernel stack - so esp0 is not a constant, it is a property of whoever
+	 * is running. Set it once at program start and it goes stale the moment
+	 * another task is scheduled: the next interrupt from ring 3 lands on the
+	 * wrong stack and quietly destroys it.
+	 *
+	 * That bug does not appear until two programs run at once, which is
+	 * exactly why it is worth stating plainly. */
+	if (next->kernel_stack_top)
+		tss_set_kernel_stack(next->kernel_stack_top);
+
+	current_uctx = next->uctx;
+
 	task_switch(&prev->esp, next->esp);
 
 	/* Resumed. Restore the interrupt state this thread had when it left. */
@@ -265,6 +326,15 @@ void task_unblock(struct task *t)
 		t->state = TASK_READY;
 }
 
+void task_set_address_space(uint32_t page_dir_phys)
+{
+	if (!current)
+		return;
+
+	current->page_dir = page_dir_phys;
+	paging_switch(page_dir_phys);
+}
+
 void task_yield(void)
 {
 	task_schedule();
@@ -290,6 +360,18 @@ void task_sleep(uint32_t ticks)
 uint32_t task_switch_count(void)
 {
 	return switches;
+}
+
+void task_terminate(void)
+{
+	if (current)
+		current->state = TASK_FINISHED;
+
+	/* Switch away and never come back. Whatever was on this kernel stack -
+	 * including the interrupt frame that brought us here - is abandoned, and
+	 * freed wholesale when the task is reaped. */
+	for (;;)
+		task_schedule();
 }
 
 void task_exit(void)
@@ -327,6 +409,20 @@ void task_list(void)
 
 		t = t->next;
 	} while (t != task_ring && guard++ < 32);
+}
+
+struct task *task_by_id(uint32_t id)
+{
+	struct task *t = task_ring;
+	uint32_t guard = 0;
+
+	do {
+		if (t->id == id)
+			return t;
+		t = t->next;
+	} while (t != task_ring && guard++ < 64);
+
+	return 0;
 }
 
 struct task *task_current(void)

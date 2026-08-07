@@ -50,7 +50,7 @@ static void command_help(void)
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  tasks         list threads\n");
 	kprintf("  install       write the demo program to the disk\n");
-	kprintf("  run <name>    load a program from disk and run it in ring 3\n");
+	kprintf("  run <name>    load a program - it runs as its own process\n");
 	kprintf("  ls            list files\n");
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
@@ -69,7 +69,7 @@ static void command_about(void)
 {
 	kprintf("Arthic v1.8 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Paging, heap, scheduler, filesystem, and it loads programs.\n");
+	kprintf("Processes: each program gets its own address space.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */

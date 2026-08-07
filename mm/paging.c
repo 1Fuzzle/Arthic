@@ -71,6 +71,7 @@
 #include "string.h"
 #include "terminal.h"
 #include "usermode.h"
+#include "task.h"
 
 #define ENTRIES 1024
 
@@ -81,8 +82,18 @@
  * mangled. `aligned(4096)` is the compiler doing that for us.
  *
  * The directory is static; the page tables come from the frame allocator. */
-static uint32_t page_directory[ENTRIES] __attribute__((aligned(4096)));
+static uint32_t kernel_directory[ENTRIES] __attribute__((aligned(4096)));
 static uint32_t mapped_limit = 0;
+
+/* Whichever directory is currently loaded in CR3. All mapping goes through
+ * this, so the loader can build a program's address space by switching to it
+ * first. */
+static uint32_t *page_directory = kernel_directory;
+
+/* How many directory entries the kernel occupies. Everything below this index
+ * is shared by every address space; everything above belongs to whichever
+ * program is loaded. */
+static uint32_t kernel_entries = 0;
 
 /* From linker.ld — the boundaries of our own code. */
 extern uint32_t kernel_text_start;
@@ -189,7 +200,12 @@ static void page_fault_handler(struct registers *regs)
 		                : "touched unmapped memory",
 		        faulting_address, regs->eip);
 
-		usermode_return();   /* back to the kernel; does not return */
+		struct task *t = task_current();
+
+		if (t && t->on_exit)
+			task_terminate();    /* a program dies; does not return */
+
+		usermode_return();       /* the built-in demo unwinds instead */
 	}
 
 	kprintf("\n*** PAGE FAULT at 0x%x\n", faulting_address);
@@ -207,7 +223,8 @@ static void page_fault_handler(struct registers *regs)
 
 void paging_init(void)
 {
-	kmemset(page_directory, 0, sizeof(page_directory));
+	kmemset(kernel_directory, 0, sizeof(kernel_directory));
+	page_directory = kernel_directory;
 
 	uint32_t top = pmm_memory_top();
 
@@ -241,7 +258,8 @@ void paging_init(void)
 		page_directory[t] = table_phys | PAGE_PRESENT | PAGE_WRITE;
 	}
 
-	mapped_limit = tables_needed * TABLE_COVERAGE;
+	mapped_limit   = tables_needed * TABLE_COVERAGE;
+	kernel_entries = tables_needed;
 
 	/* Now take write permission away from our own code and constants.
 	 * Everything from the start of .text to the end of .rodata becomes
@@ -373,4 +391,62 @@ void paging_make_user(uint32_t start, uint32_t end, int writable)
 
 		paging_set_flags(addr, flags);
 	}
+}
+
+/* ---- address spaces -------------------------------------------------------- */
+
+uint32_t paging_kernel_directory(void)
+{
+	return (uint32_t) kernel_directory;
+}
+
+uint32_t paging_create_address_space(void)
+{
+	uint32_t phys = pmm_alloc_frame();
+	if (!phys)
+		return 0;
+
+	uint32_t *dir = (uint32_t *) phys;
+
+	/* Copy the kernel's entries and zero the rest.
+	 *
+	 * Copying ENTRIES rather than pointing at them means the two directories
+	 * share the same page TABLES - so a change to a kernel mapping is visible
+	 * in every address space automatically, which is what you want. Only the
+	 * top-level array is duplicated, at 4 KB per process.
+	 *
+	 * Everything above kernel_entries starts empty. That empty region is the
+	 * program's private world, and it is why two programs can both live at
+	 * 0x20000000 without meeting.
+	 */
+	for (uint32_t i = 0; i < ENTRIES; i++)
+		dir[i] = (i < kernel_entries) ? kernel_directory[i] : 0;
+
+	return phys;
+}
+
+void paging_destroy_address_space(uint32_t page_dir_phys)
+{
+	if (!page_dir_phys || page_dir_phys == (uint32_t) kernel_directory)
+		return;
+
+	uint32_t *dir = (uint32_t *) page_dir_phys;
+
+	/* Free only the page tables this address space added. The kernel's tables
+	 * are shared by everyone and freeing one would take the system with it. */
+	for (uint32_t i = kernel_entries; i < ENTRIES; i++) {
+		if (dir[i] & PAGE_PRESENT)
+			pmm_free_frame(dir[i] & 0xFFFFF000);
+	}
+
+	pmm_free_frame(page_dir_phys);
+}
+
+void paging_switch(uint32_t page_dir_phys)
+{
+	uint32_t *dir = page_dir_phys ? (uint32_t *) page_dir_phys
+	                              : kernel_directory;
+
+	page_directory = dir;
+	__asm__ volatile ("mov %0, %%cr3" : : "r" (dir) : "memory");
 }

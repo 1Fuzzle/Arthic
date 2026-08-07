@@ -12,6 +12,8 @@
 #define SYS_WRITE 0
 #define SYS_TICKS 1
 #define SYS_EXIT  2
+#define SYS_SLEEP 3
+#define SYS_ID    4
 
 /* The one door out. eax carries which call, ebx the argument, and the result
  * comes back in eax. That convention is ours - Linux uses the same registers
@@ -91,9 +93,19 @@ void _start(void)
 	scratch[0] = 'A';
 	print("  [prog] wrote to .bss without faulting\n");
 
-	print("  [prog] ticks since boot: ");
-	print_number((unsigned int) syscall(SYS_TICKS, 0));
-	print("\n");
+	/* Every copy of this program is loaded at the same address, in its own
+	 * address space. Printing the task id alongside a fixed address makes
+	 * that visible: two programs, same 0x20000000, different memory. */
+	unsigned int id = (unsigned int) syscall(SYS_ID, 0);
+
+	for (int round = 1; round <= 4; round++) {
+		print("  [prog id ");
+		print_number(id);
+		print("] round ");
+		print_number((unsigned int) round);
+		print(" of 4, my code is at 0x20000000\n");
+		syscall(SYS_SLEEP, 18);
+	}
 
 	print("  [prog] asking the kernel to read its own memory\n");
 	syscall(SYS_WRITE, 0x100000);

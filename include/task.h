@@ -36,7 +36,31 @@ struct task {
 	enum task_state state;
 	uint32_t     stack_base;
 	uint32_t     stack_frames;
+
+	/* Top of this task's KERNEL stack. The TSS must point here whenever this
+	 * task is running, or an interrupt arriving while it is in ring 3 lands
+	 * on somebody else's stack. */
+	uint32_t     kernel_stack_top;
 	uint32_t     wake_tick;      /* meaningful only while TASK_SLEEPING */
+
+	/* Physical address of this task's page directory, or 0 to use the
+	 * kernel's. Switching tasks now means switching what addresses MEAN. */
+	uint32_t     page_dir;
+
+	/* Where to resume if this task drops to ring 3 and comes back. Per-task
+	 * rather than global, because two tasks can each be in ring 3 with only
+	 * one of them currently running. */
+	uint32_t     uctx[2];
+	/* Whatever the creator wanted this task to know. Set before the task is
+	 * made schedulable, so it is always valid by the time the task runs. */
+	void        *arg;
+
+	/* Called with `arg` once the task is dead and off the run queue. Cleanup
+	 * belongs here rather than at the end of the task's own function: a task
+	 * cannot free the stack it is standing on, and a task that faulted never
+	 * reaches the end of its function at all. */
+	void       (*on_exit)(void *arg);
+
 	struct task *next;
 
 	/* Link field for whatever wait queue this task is parked on. Intrusive
@@ -52,6 +76,25 @@ void task_init(void);
 
 /* Create a task that begins at `entry`. Returns its id, or 0 on failure. */
 uint32_t task_create(const char *name, void (*entry)(void));
+
+/* Create a task with its address space and argument already in place.
+ *
+ * Separate from task_create because the ordering matters: a task becomes
+ * schedulable the moment it joins the ring, and the timer can fire immediately
+ * afterwards. Anything the task needs must be set BEFORE that, not after. */
+uint32_t task_create_ex(const char *name, void (*entry)(void),
+                        uint32_t page_dir, void *arg,
+                        void (*on_exit)(void *arg));
+
+/* Kill the running task from wherever we are - including from inside an
+ * interrupt handler. Does not return. The current kernel stack is abandoned
+ * along with whatever is on it, which is fine because the whole stack is freed
+ * when the task is reaped. */
+void task_terminate(void);
+
+/* Give the running task its own address space. Passing 0 puts it back on the
+ * kernel's. */
+void task_set_address_space(uint32_t page_dir_phys);
 
 /* Pick the next ready task and switch to it. Called from the timer IRQ, after
  * the interrupt has been acknowledged. */
@@ -84,5 +127,6 @@ uint32_t task_switch_count(void);
 
 void         task_list(void);
 struct task *task_current(void);
+struct task *task_by_id(uint32_t id);
 
 #endif

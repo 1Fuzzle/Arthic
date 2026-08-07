@@ -24,6 +24,7 @@
 #include "timer.h"
 #include "usermode.h"
 #include "paging.h"
+#include "task.h"
 
 /* The window ring 3 may legitimately reference. Set by usermode_init. */
 static uint32_t user_range_start = 0;
@@ -85,9 +86,32 @@ static void syscall_dispatch(struct registers *regs)
 		regs->eax = timer_get_ticks();
 		return;
 
-	case SYS_EXIT:
-		usermode_exit();     /* does not return */
+	case SYS_SLEEP:
+		/* Cap it. An unbounded sleep from ring 3 is a request the kernel
+		 * should not honour without limit - a program should not be able to
+		 * park a kernel thread forever by passing a huge number. */
+		task_sleep(regs->ebx > 200 ? 200 : regs->ebx);
+		regs->eax = 0;
 		return;
+
+	case SYS_ID: {
+		struct task *t = task_current();
+		regs->eax = t ? t->id : 0;
+		return;
+	}
+
+	case SYS_EXIT: {
+		struct task *t = task_current();
+
+		/* A loaded program is a task of its own and dies as one. The built-in
+		 * ring 3 demo runs on the shell's task, which must survive, so that
+		 * one unwinds instead. */
+		if (t && t->on_exit)
+			task_terminate();    /* does not return */
+
+		usermode_exit();         /* does not return */
+		return;
+	}
 
 	default:
 		kprintf("[syscall] unknown call %u\n", regs->eax);

@@ -47,6 +47,27 @@ void paging_make_user(uint32_t start, uint32_t end, int writable);
  * table. */
 int paging_map(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
 
+/* ---- address spaces -------------------------------------------------------
+ * Up to now there has been one page directory and every address meant the same
+ * thing to everyone. A separate address space per program is what lets two
+ * programs both be loaded at 0x20000000 and not be the same memory.
+ */
+
+/* Physical address of the kernel's own directory. */
+uint32_t paging_kernel_directory(void);
+
+/* A fresh directory sharing the kernel's mappings and nothing else. Returns 0
+ * on failure. */
+uint32_t paging_create_address_space(void);
+
+/* Free a directory and any page tables it added beyond the kernel's. Does not
+ * touch the frames those tables mapped - the caller owns those. */
+void paging_destroy_address_space(uint32_t page_dir_phys);
+
+/* Make `page_dir_phys` the active address space. Passing 0 means the kernel's.
+ * Every subsequent map and unmap applies to it. */
+void paging_switch(uint32_t page_dir_phys);
+
 /* Remove a mapping. The physical frame is not freed - that is the caller's
  * business, and conflating the two is how you get double frees. */
 void paging_unmap(uint32_t virtual_addr);
