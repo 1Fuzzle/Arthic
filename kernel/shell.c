@@ -60,7 +60,10 @@ static void command_help(void)
 	kprintf("  ls            list files\n");
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
+	kprintf("  append <name> <text>  add to the end of a file\n");
+	kprintf("  append <name> <text>  add to the end of a file\n");
 	kprintf("  rm <name>     delete a file\n");
+	kprintf("  bigfile       write and verify a 20 KB file (tests indirect blocks)\n");
 	kprintf("  df            filesystem usage\n");
 	kprintf("  format        create a fresh filesystem (erases the disk)\n");
 	kprintf("  racetest      two threads, no lock - watch updates vanish\n");
@@ -75,7 +78,7 @@ static void command_about(void)
 {
 	kprintf("Arthic v1.8 - a 32-bit x86 kernel written from scratch.\n");
 	kprintf("Own GDT and IDT, PIC remapped, timer and keyboard drivers.\n");
-	kprintf("Processes with their own address spaces, pipes between tasks.\n");
+	kprintf("Processes, pipes, and files stored as block lists.\n");
 }
 
 /* Report physical memory. Frames are 4 KB, so frames * 4 is kilobytes. */
@@ -379,7 +382,7 @@ static void command_cat(const char *line)
 		return;
 	}
 
-	static char contents[512];
+	static char contents[1024];
 	uint32_t size = 0;
 
 	if (!fs_read(name, contents, sizeof(contents) - 1, &size)) {
@@ -389,6 +392,107 @@ static void command_cat(const char *line)
 
 	contents[size] = '\0';
 	kprintf("%s\n", contents);
+}
+
+static void command_append(const char *line)
+{
+	const char *rest = argument_after(line, "append ");
+
+	if (!rest) {
+		kprintf("usage: append <name> <text>\n");
+		return;
+	}
+
+	char name[FS_NAME_MAX];
+	uint32_t i = 0;
+
+	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
+		name[i] = rest[i];
+		i++;
+	}
+	name[i] = '\0';
+
+	const char *text = rest + i;
+	while (*text == ' ')
+		text++;
+
+	uint32_t length = 0;
+	while (text[length])
+		length++;
+
+	if (length == 0) {
+		kprintf("usage: append <name> <text>\n");
+		return;
+	}
+
+	if (fs_append(name, text, length))
+		kprintf("appended %u bytes to %s\n", length, name);
+	else
+		kprintf("could not append to %s\n", name);
+}
+
+/* Create a file large enough to need the indirect block, then read it back and
+ * check every byte.
+ *
+ * Worth having as a command rather than a one-off test: the indirect path only
+ * runs for files over 6 KB, so nothing you do by hand at the shell will ever
+ * exercise it. Code that is never run is code that does not work.
+ */
+static void command_bigfile(void)
+{
+	if (!fs_is_mounted()) {
+		kprintf("no filesystem - run 'format' first\n");
+		return;
+	}
+
+	const uint32_t size = 20000;      /* well past 12 direct blocks */
+
+	uint8_t *data = (uint8_t *) kmalloc(size);
+	if (!data) {
+		kprintf("out of heap\n");
+		return;
+	}
+
+	/* A pattern that catches a block being written to the wrong place: every
+	 * byte depends on its own offset, so a swapped or missing block shows up
+	 * immediately rather than looking plausible. */
+	for (uint32_t i = 0; i < size; i++)
+		data[i] = (uint8_t)(i * 7 + (i >> 8));
+
+	fs_delete("bigfile");
+
+	if (!fs_create("bigfile", data, size)) {
+		kprintf("could not create it\n");
+		kfree(data);
+		return;
+	}
+
+	uint8_t *back = (uint8_t *) kmalloc(size);
+	if (!back) {
+		kprintf("out of heap for the read-back\n");
+		kfree(data);
+		return;
+	}
+
+	uint32_t got = 0;
+	if (!fs_read("bigfile", back, size, &got)) {
+		kprintf("could not read it back\n");
+		kfree(data);
+		kfree(back);
+		return;
+	}
+
+	uint32_t bad = 0;
+	for (uint32_t i = 0; i < got; i++)
+		if (back[i] != data[i])
+			bad++;
+
+	kprintf("wrote %u bytes, read back %u, %u wrong\n", size, got, bad);
+	kprintf("%s\n", (got == size && bad == 0)
+	        ? "indirect blocks work" : "SOMETHING IS WRONG");
+
+	kfree(data);
+	kfree(back);
 }
 
 static void command_rm(const char *line)
@@ -632,6 +736,8 @@ static void execute(const char *line)
 		command_run(line);
 	else if (kstrcmp(line, "ls") == 0)
 		fs_list();
+	else if (kstrcmp(line, "bigfile") == 0)
+		command_bigfile();
 	else if (kstrcmp(line, "df") == 0)
 		command_df();
 	else if (kstrcmp(line, "format") == 0)
@@ -640,6 +746,10 @@ static void execute(const char *line)
 		command_write(line);
 	else if (kstartswith(line, "cat "))
 		command_cat(line);
+	else if (kstartswith(line, "append "))
+		command_append(line);
+	else if (kstartswith(line, "append "))
+		command_append(line);
 	else if (kstartswith(line, "rm "))
 		command_rm(line);
 	else if (kstrcmp(line, "spin") == 0)

@@ -61,6 +61,18 @@ struct task {
 	 * reaches the end of its function at all. */
 	void       (*on_exit)(void *arg);
 
+	/* Output from ring 3 is held here until a newline arrives, then emitted
+	 * in one go. Individual writes were already serialised; a whole LINE was
+	 * not, so two processes could interleave halfway through a message. */
+	char         out_buf[120];
+	uint32_t     out_len;
+
+	/* Output from ring 3 is held here until a newline arrives, then emitted
+	 * in one piece. The console lock makes a single write atomic; this makes
+	 * a whole LINE atomic, which is the thing anyone actually wanted. */
+	char         outbuf[128];
+	uint32_t     outlen;
+
 	struct task *next;
 
 	/* Link field for whatever wait queue this task is parked on. Intrusive
@@ -91,6 +103,10 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
  * along with whatever is on it, which is fine because the whole stack is freed
  * when the task is reaped. */
 void task_terminate(void);
+
+/* Emit whatever this task has buffered but not yet ended with a newline.
+ * Called when a task dies, so its last partial line is not lost. */
+void task_flush_output(struct task *t);
 
 /* Give the running task its own address space. Passing 0 puts it back on the
  * kernel's. */

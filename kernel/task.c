@@ -35,6 +35,7 @@
 #include "timer.h"
 #include "paging.h"
 #include "tss.h"
+#include "terminal.h"
 
 #define STACK_FRAMES 2   /* 8 KB per thread */
 
@@ -160,6 +161,8 @@ static void reap(struct task *prev, struct task *dead)
 
 	/* Off the run queue, so it can never be scheduled again - only now is it
 	 * safe to release what it owned. */
+	task_flush_output(dead);
+
 	if (dead->on_exit)
 		dead->on_exit(dead->arg);
 
@@ -408,8 +411,23 @@ uint32_t task_switch_count(void)
 	return switches;
 }
 
+void task_flush_output(struct task *t)
+{
+	if (!t || t->out_len == 0)
+		return;
+
+	t->out_buf[t->out_len] = '\0';
+	t->out_len = 0;
+
+	terminal_write(t->out_buf);
+}
+
 void task_terminate(void)
 {
+	/* A program that dies mid-line should still have that line appear. */
+	if (current)
+		task_flush_output(current);
+
 	if (current)
 		current->state = TASK_FINISHED;
 

@@ -23,6 +23,12 @@
 #define SYS_PIPE_WRITE 5   /* ebx = buffer, ecx = length */
 #define SYS_PIPE_READ  6   /* ebx = buffer, ecx = max, returns bytes read */
 
+struct task;
+
+/* Emit whatever the task has buffered but not yet terminated with a newline.
+ * Called when a program exits or dies, so its last partial line is not lost. */
+void syscall_flush_output(struct task *t);
+
 void syscall_install(void);
 
 /* Tell the syscall layer which address range ring 3 may reference. Anything

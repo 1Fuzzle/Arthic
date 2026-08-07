@@ -99,6 +99,48 @@ static int user_string_ok(uint32_t ptr, uint32_t max_length)
 	return 0;                            /* too long */
 }
 
+/* Buffer a program's output until a line is complete.
+ *
+ * Without this, `print("line "); print("12\n");` from one process can have
+ * another process's output land between the two calls - which is exactly what
+ * you see if you look: "line 1  [writer] finished" then "1 through the pipe".
+ * Each write was atomic; the sequence was not.
+ *
+ * Real terminals do the same thing, and it is the other half of line
+ * discipline - the shell already does the input side.
+ *
+ * The buffer is per-task, so two processes building lines at the same time do
+ * not corrupt each other's. It flushes on a newline or when full; the second
+ * condition matters because a program that never emits one must not be able to
+ * make the kernel buffer without limit.
+ */
+static void buffered_write(struct task *t, const char *text)
+{
+	if (!t) {
+		terminal_write(text);        /* no task context - just print it */
+		return;
+	}
+
+	for (uint32_t i = 0; text[i]; i++) {
+		t->outbuf[t->outlen++] = text[i];
+
+		if (text[i] == '\n' || t->outlen >= sizeof(t->outbuf) - 1) {
+			t->outbuf[t->outlen] = '\0';
+			terminal_write(t->outbuf);
+			t->outlen = 0;
+		}
+	}
+}
+
+void syscall_flush_output(struct task *t)
+{
+	if (t && t->outlen) {
+		t->outbuf[t->outlen] = '\0';
+		terminal_write(t->outbuf);
+		t->outlen = 0;
+	}
+}
+
 static void syscall_dispatch(struct registers *regs)
 {
 	switch (regs->eax) {
@@ -111,7 +153,7 @@ static void syscall_dispatch(struct registers *regs)
 			regs->eax = (uint32_t) -1;
 			return;
 		}
-		terminal_write((const char *) regs->ebx);
+		buffered_write(task_current(), (const char *) regs->ebx);
 		regs->eax = 0;
 		return;
 
@@ -169,6 +211,9 @@ static void syscall_dispatch(struct registers *regs)
 
 	case SYS_EXIT: {
 		struct task *t = task_current();
+
+		/* Anything half-written should still be seen. */
+		syscall_flush_output(t);
 
 		/* A loaded program is a task of its own and dies as one. The built-in
 		 * ring 3 demo runs on the shell's task, which must survive, so that

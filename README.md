@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v2.2
+## Current state - v2.3
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -32,8 +32,9 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - A demonstration of the race a lock prevents, and of the lost-wakeup race that
   naive blocking would introduce
 - ATA PIO disk driver: LBA28, read and write sectors, with cache flush
-- ArthicFS: superblock, 64-entry directory, block bitmap, contiguous files -
-  and files survive a reboot
+- ArthicFS: superblock, 32-entry directory, block bitmap, and files stored as a
+  block LIST - 12 direct blocks plus one indirect block, ext2's inode design in
+  miniature. Files need not be contiguous, can grow, and survive a reboot
 - An ELF loader: parses program headers, maps each segment with its own
   permissions (code read-only, data writable), zeroes `.bss` rather than storing
   it, and takes the entry point from the file
@@ -48,12 +49,12 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
   behaving differently
 - `kill` - terminate a running task from the shell, and `spin` to give it
   something that genuinely will not stop on its own
-- Console output serialised, so two tasks printing at once no longer interleave
-  mid-word
+- Console output serialised, and per-process line buffering so a whole LINE is
+  atomic rather than a single write
 - A shell: `help`, `about`, `ticks`, `mem`, `alloc`, `heap`, `heaptest`,
   `tasks`, `spawn`, `racetest`, `locktest`, `ls`, `cat`, `write`, `rm`, `df`,
-  `format`, `install`, `run`, `spin`, `kill`, `pipetest`, `pipestat`, `user`,
-  `wptest`, `echo`, `clear`
+  `format`, `install`, `run`, `spin`, `kill`, `pipetest`, `pipestat`,
+  `append`, `bigfile`, `user`, `wptest`, `echo`, `clear`
 
 No filesystem yet.
 
@@ -134,6 +135,10 @@ does not, that is a hint the thing is doing two jobs.
 `arthic.img` is a 16 MB disk image, created automatically on first run and kept
 between runs so files persist. Delete it by hand to start from a blank disk.
 
+**The on-disk format changed in v2.3.** The superblock magic changed with it, so
+an older image is refused rather than misread - run `format` once after
+upgrading.
+
 ## Build flags that matter
 
 - `-m32` — 32-bit. The CPU is in 32-bit mode after GRUB hands over.
@@ -188,8 +193,8 @@ Should be `0`.
 17. ~~Processes with separate address spaces~~ (v2.0)
 18. ~~kill, and pipes~~ (v2.1)
 19. ~~Pipes for ring 3, program arguments, console lock~~ (v2.2)
-20. **Next:** block-mapped files, so a file need not be contiguous and can grow
-21. Later: 64-bit long mode, and with it a real NX bit
+20. ~~Line buffering and block-mapped files~~ (v2.3)
+21. **Next:** 64-bit long mode, and with it a real NX bit
 
 ### A known limitation
 

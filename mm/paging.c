@@ -72,6 +72,7 @@
 #include "terminal.h"
 #include "usermode.h"
 #include "task.h"
+#include "syscall.h"
 
 #define ENTRIES 1024
 
@@ -201,6 +202,8 @@ static void page_fault_handler(struct registers *regs)
 		        faulting_address, regs->eip);
 
 		struct task *t = task_current();
+
+		syscall_flush_output(t);
 
 		if (t && t->on_exit)
 			task_terminate();    /* a program dies; does not return */
