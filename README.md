@@ -176,13 +176,15 @@ Should be `0`.
 
 ## Roadmap
 
+### Done
+
 1. ~~Scrolling~~ (v0.2)
 2. ~~Hardware cursor~~ (v0.3)
 3. ~~`kprintf`~~ (v0.4)
 4. ~~GDT~~ (v0.5)
 5. ~~IDT, PIC remap, timer~~ (v0.6) and ~~keyboard, shell~~ (v0.7)
 6. ~~Physical memory manager~~ (v0.9)
-7. ~~Paging~~ (v1.0) — write protection done; NX blocked until PAE or long mode
+7. ~~Paging~~ (v1.0)
 8. ~~Heap (kmalloc)~~ (v1.1)
 9. ~~TSS and user mode~~ (v1.2) - ring 3 and a validated syscall gate
 10. ~~Scheduler~~ (v1.3) - preemptive round robin over kernel threads
@@ -196,7 +198,95 @@ Should be `0`.
 18. ~~kill, and pipes~~ (v2.1)
 19. ~~Pipes for ring 3, program arguments, console lock~~ (v2.2)
 20. ~~Line buffering and block-mapped files~~ (v2.3)
-21. **Next:** 64-bit long mode, and with it a real NX bit
+21. ~~NX via PAE - W^X complete~~ (v2.4)
+22. ~~64-bit long mode~~ - boots, four-level paging, memory manager, heap
+    (`long-mode` branch, stage 2)
+
+### Planned
+
+Sizes are rough: **S** an evening, **M** a session or two, **L** several
+sessions, **XL** a project in its own right.
+
+**Bringing 64-bit to parity** - until this is done, `main` is the capable branch
+and `long-mode` is a demonstration.
+
+23. **TSS and ring 3 on 64-bit** (M) - the 64-bit TSS holds no task state at
+    all, only stack pointers, and gains the IST: seven known-good stacks the CPU
+    switches to for specific vectors, which is how a kernel survives a fault
+    caused by a broken stack pointer
+24. **`syscall`/`sysret`** (M) - a purpose-built instruction pair that skips the
+    IDT. It does not switch stacks for you, so the kernel does it by hand with
+    `swapgs` - get that wrong and you either corrupt a user pointer or leak a
+    kernel one
+25. **Scheduler and context switch on 64-bit** (M) - fifteen registers instead
+    of eight
+26. **Locks and pipes on 64-bit** (S) - nearly a straight copy; `xchg` is
+    identical
+27. **Disk driver and filesystem on 64-bit** (M) - port I/O does not care about
+    mode
+28. **ELF64 loader and processes** (L) - a PML4 per process rather than a PDPT
+
+**Security hardening**
+
+29. **Stack canaries** (S) - `-fno-stack-protector` is in the build flags only
+    because `__stack_chk_fail` does not exist. Write it, drop the flag. Ten
+    lines for a real mitigation.
+30. **SMEP and SMAP** (S) - two bits in CR4. One stops the kernel executing
+    userspace memory, the other stops it reading userspace memory outside
+    bracketed sections. Both close whole vulnerability classes.
+31. **Guard page under every stack** (S) - one unmapped page below each kernel
+    stack, so an overflow faults immediately instead of quietly eating the next
+    task's data
+32. **ASLR** (M) - load programs at a random address instead of always
+    `0x20000000`. Needs position-independent executables, which are nearly free
+    in 64-bit thanks to RIP-relative addressing.
+33. **A deliberate syscall audit** (M) - every syscall re-examined with the
+    three-check rule (start in range, length sane, end in range). This is the
+    surface that matters most.
+
+**Real system behaviour**
+
+34. **Serial output** (S) - a COM port driver so kernel output goes to a file on
+    the host instead of only to a screen you have to photograph. Highest value
+    per line on this list.
+35. **Interrupt-driven disk I/O** (S) - the driver polls and blocks the CPU for
+    the whole transfer. Sleep the caller, wake it on IRQ 14.
+36. **A buffer cache** (M) - keep recently read blocks in memory. Every
+    filesystem operation currently goes to the disk, including reading the same
+    directory sector repeatedly.
+37. **Subdirectories** (M) - make a directory just another file whose contents
+    are directory entries. Removes both the 64-file limit and the flat namespace
+    at once.
+38. **Crash consistency** (L) - a power cut mid-write can currently leave a
+    directory entry pointing at unwritten data. Ordering helps; a journal is the
+    real answer.
+39. **`fork` and `exec`** (L) - the Unix process model. `fork` needs
+    copy-on-write, which needs the page fault handler to do real work rather
+    than report and die. That is the piece that makes the memory manager feel
+    finished.
+
+**Breadth**
+
+40. **APIC, HPET and the TSC** (M) - the PIC and PIT are 1981 hardware kept
+    alive by emulation. The APIC is what real systems use and a prerequisite for
+    more than one core.
+41. **SMP** (XL) - more than one CPU. Everything assuming a single core breaks:
+    disabling interrupts stops *this* core only, so every interrupts-off section
+    becomes a real spinlock. The change that would force the most rethinking,
+    and worth doing for exactly that reason.
+42. **Networking** (XL) - an e1000 driver, then ARP, IP, UDP, eventually TCP.
+    The largest item here and the furthest from everything else, but "Arthic
+    replied to a ping" is a good day.
+
+### Deliberately not planned
+
+A window system, sound, and USB - each a large project that teaches less per
+hour than the above, and USB in particular is a swamp.
+
+Making Arthic a daily driver. It will not be one. The kernel is the learning
+project; a system people could actually use is the distro path, a Linux base
+with a custom userland on top. That is different work, and this qualifies you
+for it rather than replacing it.
 
 ### A known limitation
 
@@ -206,8 +296,6 @@ following a dangling pointer. Doing it properly means every wait queue can have
 members removed from underneath it - Linux uses a signal that wakes the task so
 it can unwind and remove itself. That is a project of its own, not a missing
 line.
-18. Later: block-mapped files, so a file need not be contiguous and can grow
-19. Later: 64-bit long mode, and with it a real NX bit
 
 ## Reference
 
