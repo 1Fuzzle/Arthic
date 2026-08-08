@@ -14,6 +14,7 @@
 #include <stdarg.h>
 
 #include "terminal.h"
+#include "serial.h"
 #include "io.h"
 
 /* ---- serialising the console ----------------------------------------------
@@ -258,6 +259,11 @@ static void terminal_scroll(void) {
  * it only means "new line" because code like this decides it does.
  */
 void terminal_putchar(char ch) {
+	/* Send to serial as well as VGA. This goes outside the console lock
+	 * because serial I/O does not need to be atomic with screen updates —
+	 * the host's serial capture will see every character regardless. */
+	serial_putchar(ch);
+
 	if (ch == '\n') {
 		terminal_column = 0;
 		terminal_row++;

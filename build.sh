@@ -23,12 +23,17 @@ INCLUDE=include
 #   -mno-mmx -mno-sse ...     REQUIRED. Without these gcc vectorises loops into
 #                             SSE instructions, which the CPU refuses to run
 #                             before SSE is enabled in CR4 — triple fault.
-#   -fno-stack-protector      needs __stack_chk_fail, which we have not written
 #   -I$INCLUDE                where our headers live
 #   -Wall -Wextra             warnings in kernel code are usually real bugs
-CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
-        -fno-builtin -fno-stack-protector -fno-pie -nostdlib \
+BASE_CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
+        -fno-builtin -fno-pie -nostdlib \
         -I$INCLUDE -I$BUILD -Wall -Wextra -O2"
+
+# Kernel-specific flags: enable stack canary protection
+KERNEL_CFLAGS="$BASE_CFLAGS -fstack-protector"
+
+# User program flags: no stack protection (user programs handle their own security)
+USER_CFLAGS="$BASE_CFLAGS -fno-stack-protector"
 
 ASFLAGS="-m32"
 
@@ -48,7 +53,7 @@ mkdir -p "$BUILD"
 # This is the honest version of "a program is just a file". Nothing about
 # prog.c knows it will be run by Arthic.
 echo "compiling  user/prog.c"
-gcc $CFLAGS -c user/prog.c -o "$BUILD/prog.o"
+gcc $USER_CFLAGS -c user/prog.c -o "$BUILD/prog.o"
 
 echo "linking    user program"
 ld -m elf_i386 -T user/prog.ld -o "$BUILD/prog.elf" "$BUILD/prog.o"
@@ -80,12 +85,12 @@ done
 
 # C sources
 for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c \
-           drivers/terminal.c drivers/keyboard.c drivers/timer.c \
-           mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
+           drivers/terminal.c drivers/keyboard.c drivers/timer.c drivers/serial.c \
+           mm/pmm.c mm/paging.c mm/kheap.c lib/string.c lib/canary.c \
            drivers/ata.c fs/fs.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
 	echo "compiling  $src"
-	gcc $CFLAGS -c "$src" -o "$obj"
+	gcc $KERNEL_CFLAGS -c "$src" -o "$obj"
 done
 
 echo "linking    arthic.bin"
@@ -111,6 +116,8 @@ if [ "$1" = "run" ]; then
 	fi
 
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
+	echo "Serial output will be written to serial.log"
 	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin \
-	    -drive file="$DISK",format=raw,if=ide
+	    -drive file="$DISK",format=raw,if=ide \
+	    -serial file:serial.log
 fi
