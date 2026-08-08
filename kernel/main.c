@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "terminal.h"
+#include "serial.h"
 #include "gdt.h"
 #include "idt.h"
 #include "timer.h"
@@ -30,6 +31,7 @@
  */
 void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_initialise();
+	serial_initialise();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
 	terminal_write("  _   _   _   _   _   _\n");

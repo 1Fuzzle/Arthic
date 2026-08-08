@@ -80,7 +80,7 @@ done
 
 # C sources
 for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c \
-           drivers/terminal.c drivers/keyboard.c drivers/timer.c \
+           drivers/terminal.c drivers/keyboard.c drivers/timer.c drivers/serial.c \
            mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
            drivers/ata.c fs/fs.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
@@ -111,6 +111,8 @@ if [ "$1" = "run" ]; then
 	fi
 
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
+	echo "Serial output will be written to serial.log"
 	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin \
-	    -drive file="$DISK",format=raw,if=ide
+	    -drive file="$DISK",format=raw,if=ide \
+	    -serial file:serial.log
 fi
