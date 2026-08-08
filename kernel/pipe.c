@@ -31,37 +31,11 @@
 #include "pipe.h"
 #include "task.h"
 #include "string.h"
+#include "waitqueue.h"
 
 void pipe_init(struct pipe *p)
 {
 	kmemset(p, 0, sizeof(*p));
-}
-
-static void enqueue(struct task **head, struct task **tail, struct task *t)
-{
-	t->wait_next = 0;
-
-	if (*tail)
-		(*tail)->wait_next = t;
-	else
-		*head = t;
-
-	*tail = t;
-}
-
-static void wake_one(struct task **head, struct task **tail)
-{
-	struct task *t = *head;
-
-	if (!t)
-		return;
-
-	*head = t->wait_next;
-	if (!*head)
-		*tail = 0;
-
-	t->wait_next = 0;
-	task_unblock(t);
 }
 
 uint32_t pipe_write(struct pipe *p, const char *data, uint32_t length)
@@ -76,7 +50,7 @@ uint32_t pipe_write(struct pipe *p, const char *data, uint32_t length)
 				p->count++;
 
 				/* Somebody may have been waiting for exactly this byte. */
-				wake_one(&p->readers_head, &p->readers_tail);
+				wait_queue_wake_one(&p->readers);
 
 				irq_restore(flags);
 				break;
@@ -86,7 +60,7 @@ uint32_t pipe_write(struct pipe *p, const char *data, uint32_t length)
 			 * interrupts off so no reader can drain the pipe and wake an
 			 * empty queue in the gap. */
 			p->blocked_writes++;
-			enqueue(&p->writers_head, &p->writers_tail, task_current());
+			wait_queue_add(&p->writers, task_current());
 			task_block();
 			irq_restore(flags);
 		}
@@ -107,7 +81,7 @@ uint32_t pipe_read(struct pipe *p, char *out, uint32_t max)
 			p->read_pos = (p->read_pos + 1) % PIPE_CAPACITY;
 			p->count--;
 
-			wake_one(&p->writers_head, &p->writers_tail);
+			wait_queue_wake_one(&p->writers);
 			irq_restore(flags);
 
 			/* Return as soon as we have something rather than insisting on
@@ -124,7 +98,7 @@ uint32_t pipe_read(struct pipe *p, char *out, uint32_t max)
 		}
 
 		p->blocked_reads++;
-		enqueue(&p->readers_head, &p->readers_tail, task_current());
+		wait_queue_add(&p->readers, task_current());
 		task_block();
 		irq_restore(flags);
 	}

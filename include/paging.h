@@ -47,6 +47,14 @@ void paging_make_user(uint32_t start, uint32_t end, int writable);
  * table. */
 int paging_map(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags);
 
+/* Map `pages` consecutive pages, virtual and physical both running forward from
+ * the given addresses. Returns 0 as soon as one of them fails, leaving the
+ * earlier ones mapped - the caller is tearing the whole thing down anyway, and
+ * every caller of this is doing so by freeing the frames and destroying the
+ * address space. */
+int paging_map_range(uint32_t virtual_addr, uint32_t physical_addr,
+                     uint32_t pages, uint32_t flags);
+
 /* ---- address spaces -------------------------------------------------------
  * Up to now there has been one page directory and every address meant the same
  * thing to everyone. A separate address space per program is what lets two

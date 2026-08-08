@@ -49,40 +49,13 @@
 
 #include "lock.h"
 #include "task.h"
+#include "waitqueue.h"
 
 void mutex_init(struct mutex *m)
 {
 	m->locked    = 0;
 	m->contended = 0;
-	m->wait_head = 0;
-	m->wait_tail = 0;
-}
-
-static void enqueue(struct mutex *m, struct task *t)
-{
-	t->wait_next = 0;
-
-	if (m->wait_tail)
-		m->wait_tail->wait_next = t;
-	else
-		m->wait_head = t;
-
-	m->wait_tail = t;
-}
-
-static struct task *dequeue(struct mutex *m)
-{
-	struct task *t = m->wait_head;
-
-	if (!t)
-		return 0;
-
-	m->wait_head = t->wait_next;
-	if (!m->wait_head)
-		m->wait_tail = 0;
-
-	t->wait_next = 0;
-	return t;
+	wait_queue_init(&m->waiters);
 }
 
 void mutex_lock(struct mutex *m)
@@ -98,7 +71,7 @@ void mutex_lock(struct mutex *m)
 		}
 
 		m->contended++;
-		enqueue(m, task_current());
+		wait_queue_add(&m->waiters, task_current());
 
 		/* Still with interrupts off, so no unlock can slip between joining
 		 * the queue and becoming unrunnable. task_block switches away and the
@@ -119,9 +92,7 @@ void mutex_unlock(struct mutex *m)
 
 	m->locked = 0;
 
-	struct task *waiter = dequeue(m);
-	if (waiter)
-		task_unblock(waiter);
+	wait_queue_wake_one(&m->waiters);
 
 	irq_restore(flags);
 }

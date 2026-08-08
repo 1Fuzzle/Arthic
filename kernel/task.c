@@ -35,7 +35,6 @@
 #include "timer.h"
 #include "paging.h"
 #include "tss.h"
-#include "terminal.h"
 
 #define STACK_FRAMES 2   /* 8 KB per thread */
 
@@ -51,16 +50,6 @@ static uint32_t     switches = 0;
  * the running task's save area. */
 extern uint32_t *current_uctx;
 
-static void copy_name(char *dest, const char *src)
-{
-	int i = 0;
-	while (src[i] && i < TASK_NAME_MAX - 1) {
-		dest[i] = src[i];
-		i++;
-	}
-	dest[i] = '\0';
-}
-
 void task_init(void)
 {
 	struct task *t = (struct task *) kmalloc(sizeof(struct task));
@@ -71,7 +60,7 @@ void task_init(void)
 
 	kmemset(t, 0, sizeof(*t));
 
-	copy_name(t->name, "kernel");
+	kstrlcpy(t->name, "kernel", sizeof(t->name));
 
 	/* Task 0 runs on the stack boot.s set up. We do not know its top exactly,
 	 * so take the current pointer with headroom - it only matters that an
@@ -140,7 +129,7 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
 	t->page_dir = page_dir;
 	t->arg      = arg;
 	t->on_exit  = on_exit;
-	copy_name(t->name, name);
+	kstrlcpy(t->name, name, sizeof(t->name));
 
 	/* Splice into the ring, immediately after the current task. Inserting
 	 * here rather than at some notional end keeps it O(1) and there is no
@@ -166,8 +155,7 @@ static void reap(struct task *prev, struct task *dead)
 	if (dead->on_exit)
 		dead->on_exit(dead->arg);
 
-	for (uint32_t i = 0; i < dead->stack_frames; i++)
-		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
+	pmm_free_range(dead->stack_base, dead->stack_frames);
 
 	kfree(dead);
 }
@@ -292,19 +280,6 @@ void task_schedule(void)
 	 * confusing to read. */
 }
 
-uint32_t irq_save(void)
-{
-	uint32_t flags;
-	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
-	return flags;
-}
-
-void irq_restore(uint32_t flags)
-{
-	if (flags & 0x200)
-		__asm__ volatile ("sti" ::: "memory");
-}
-
 void task_block(void)
 {
 	if (!enabled || !current)
@@ -409,6 +384,35 @@ void task_sleep(uint32_t ticks)
 uint32_t task_switch_count(void)
 {
 	return switches;
+}
+
+/* Line buffering for output from ring 3.
+ *
+ * Without it, `print("line "); print("12\n");` from one process can have
+ * another process's output land between the two calls. Each write was already
+ * atomic - the console lock does that - but the SEQUENCE was not, and a line is
+ * what a reader cares about.
+ *
+ * Lives here rather than in syscall.c because the buffer belongs to the task,
+ * and because the reaper has to be able to flush a task that died mid-line
+ * without knowing anything about syscalls.
+ */
+void task_write_buffered(struct task *t, const char *text)
+{
+	if (!t) {
+		terminal_write(text);        /* no task context - just print it */
+		return;
+	}
+
+	for (uint32_t i = 0; text[i]; i++) {
+		t->out_buf[t->out_len++] = text[i];
+
+		/* Flush on a newline, or when the buffer is full. The second
+		 * condition is not tidiness: a program that never emits a newline
+		 * must not be able to make the kernel buffer without limit. */
+		if (text[i] == '\n' || t->out_len >= sizeof(t->out_buf) - 1)
+			task_flush_output(t);
+	}
 }
 
 void task_flush_output(struct task *t)

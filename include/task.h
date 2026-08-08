@@ -15,6 +15,11 @@
 
 #include <stdint.h>
 
+/* Included rather than re-declared: the scheduler and everything that blocks
+ * needs interrupts-off regions, and there should be exactly one definition of
+ * what that means. */
+#include "irq.h"
+
 #define TASK_NAME_MAX 16
 
 enum task_state {
@@ -62,16 +67,13 @@ struct task {
 	void       (*on_exit)(void *arg);
 
 	/* Output from ring 3 is held here until a newline arrives, then emitted
-	 * in one go. Individual writes were already serialised; a whole LINE was
-	 * not, so two processes could interleave halfway through a message. */
-	char         out_buf[120];
-	uint32_t     out_len;
-
-	/* Output from ring 3 is held here until a newline arrives, then emitted
 	 * in one piece. The console lock makes a single write atomic; this makes
-	 * a whole LINE atomic, which is the thing anyone actually wanted. */
-	char         outbuf[128];
-	uint32_t     outlen;
+	 * a whole LINE atomic, which is the thing anyone actually wanted.
+	 *
+	 * Per-task rather than global, so two processes building a line at the
+	 * same time do not corrupt each other's. */
+	char         out_buf[128];
+	uint32_t     out_len;
 
 	struct task *next;
 
@@ -103,6 +105,14 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
  * along with whatever is on it, which is fine because the whole stack is freed
  * when the task is reaped. */
 void task_terminate(void);
+
+/* Add `text` to this task's line buffer, emitting it whenever a newline
+ * arrives or the buffer fills. Passing a task of 0 - no task context - prints
+ * straight through instead.
+ *
+ * The full-buffer condition is not just tidiness: a program that never emits a
+ * newline must not be able to make the kernel buffer without limit. */
+void task_write_buffered(struct task *t, const char *text);
 
 /* Emit whatever this task has buffered but not yet ended with a newline.
  * Called when a task dies, so its last partial line is not lost. */
@@ -136,11 +146,6 @@ void task_unblock(struct task *t);
  * if it is currently blocked - see the comment in task_kill for why that last
  * one is refused rather than forced. */
 int task_kill(uint32_t id);
-
-/* Save the interrupt flag and disable interrupts; restore it later. Returned
- * value must be treated as opaque. */
-uint32_t irq_save(void);
-void     irq_restore(uint32_t flags);
 
 /* How many context switches have happened. Cheap way to see the scheduler
  * doing work. */

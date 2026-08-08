@@ -15,6 +15,7 @@
 
 #include "terminal.h"
 #include "io.h"
+#include "irq.h"
 
 /* ---- serialising the console ----------------------------------------------
  * Two tasks writing at once interleave mid-word: you get "kill 1[task 5] 2 of"
@@ -31,19 +32,13 @@
  * with us, whether it is another task or another interrupt. It is a blunt tool
  * and it is the right one, which is why real kernels do the same for their
  * emergency print paths.
+ *
+ * Which is precisely what irq_save gives the scheduler and the pipes, so this
+ * uses that rather than keeping a second copy of the same two instructions.
+ * The names stay, because "take the console lock" says why we are doing it.
  */
-static inline uint32_t console_lock(void)
-{
-	uint32_t flags;
-	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
-	return flags;
-}
-
-static inline void console_unlock(uint32_t flags)
-{
-	if (flags & 0x200)
-		__asm__ volatile ("sti" ::: "memory");
-}
+#define console_lock()        irq_save()
+#define console_unlock(flags) irq_restore(flags)
 
 /* ---- Types ----------------------------------------------------------------
  * stdint.h and stddef.h are two of the very few headers that are safe here,
@@ -164,6 +159,20 @@ static uint16_t *terminal_buffer;   /* <-- a POINTER. See the note below.     */
  * whole job.
  */
 
+/* Put one character at an exact position. */
+static void terminal_put_at(char ch, uint8_t colour, size_t x, size_t y) {
+	terminal_buffer[y * VGA_WIDTH + x] = vga_entry(ch, colour);
+}
+
+/* Fill every cell with a space in the current colour. Both initialisation and
+ * `clear` want exactly this and nothing else - the difference between them is
+ * only whether the hardware cursor is set up as well. */
+static void terminal_blank(void) {
+	for (size_t y = 0; y < VGA_HEIGHT; y++)
+		for (size_t x = 0; x < VGA_WIDTH; x++)
+			terminal_put_at(' ', terminal_colour, x, y);
+}
+
 void terminal_initialise(void) {
 	terminal_row    = 0;
 	terminal_column = 0;
@@ -172,14 +181,10 @@ void terminal_initialise(void) {
 
 	terminal_enable_cursor(14, 15);   /* scanlines 14-15: an underscore */
 
-	/* Blank every cell. Nothing clears the screen for us. */
-	for (size_t y = 0; y < VGA_HEIGHT; y++) {
-		for (size_t x = 0; x < VGA_WIDTH; x++) {
-			/* The screen is a 2D grid but memory is a 1D line, so we flatten
-			 * the coordinates: row y, column x lives at y * WIDTH + x.       */
-			terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_colour);
-		}
-	}
+	/* Nothing clears the screen for us. Note how the 2D grid is flattened onto
+	 * 1D memory inside terminal_put_at: row y, column x lives at
+	 * y * WIDTH + x. */
+	terminal_blank();
 
 	terminal_move_cursor(0, 0);
 }
@@ -188,18 +193,10 @@ void terminal_set_colour(uint8_t colour) {
 	terminal_colour = colour;
 }
 
-/* Put one character at an exact position. */
-static void terminal_put_at(char ch, uint8_t colour, size_t x, size_t y) {
-	terminal_buffer[y * VGA_WIDTH + x] = vga_entry(ch, colour);
-}
-
-
-/* Blank the screen and put the cursor back at the top. Same loop as
- * terminal_initialise, without re-initialising the hardware cursor. */
+/* Blank the screen and put the cursor back at the top - the same blanking as
+ * initialisation, without re-initialising the hardware cursor. */
 void terminal_clear(void) {
-	for (size_t y = 0; y < VGA_HEIGHT; y++)
-		for (size_t x = 0; x < VGA_WIDTH; x++)
-			terminal_buffer[y * VGA_WIDTH + x] = vga_entry(' ', terminal_colour);
+	terminal_blank();
 
 	terminal_row = 0;
 	terminal_column = 0;
@@ -247,10 +244,8 @@ static void terminal_scroll(void) {
 	/* The bottom row still holds a stale copy of what was there before, so
 	 * blank it. Using terminal_colour (not a hardcoded grey) means a blank
 	 * line inherits whatever colour is currently active. */
-	for (size_t x = 0; x < VGA_WIDTH; x++) {
-		terminal_buffer[(VGA_HEIGHT - 1) * VGA_WIDTH + x] =
-			vga_entry(' ', terminal_colour);
-	}
+	for (size_t x = 0; x < VGA_WIDTH; x++)
+		terminal_put_at(' ', terminal_colour, x, VGA_HEIGHT - 1);
 }
 
 /* Put one character at the cursor, handling newlines and wrapping ourselves.

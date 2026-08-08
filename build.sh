@@ -79,7 +79,7 @@ for src in boot/boot.s kernel/interrupts.s kernel/switch.s; do
 done
 
 # C sources
-for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c \
+for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c kernel/waitqueue.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
            drivers/ata.c fs/fs.c; do

@@ -18,6 +18,8 @@
 #include "ata.h"
 #include "string.h"
 #include "terminal.h"
+#include "util.h"
+#include "bitmap.h"
 
 static struct fs_superblock super;
 static int mounted = 0;
@@ -32,39 +34,63 @@ static struct fs_entry directory[FS_MAX_FILES];
 
 /* ---- directory and bitmap ------------------------------------------------- */
 
-static int read_directory(void)
+/* The directory spans several sectors, and reading it is the same walk as
+ * writing it with one call swapped. One function with a direction flag, because
+ * two copies of the addressing arithmetic is two places for an off-by-one to
+ * hide - and a directory written to the wrong sector is a lost filesystem. */
+static int transfer_directory(int writing)
 {
-	uint8_t *dest = (uint8_t *) directory;
+	uint8_t *bytes = (uint8_t *) directory;
 
-	for (uint32_t i = 0; i < FS_DIR_SECTORS; i++)
-		if (!ata_read_sector(FS_DIR_START + i, dest + i * SECTOR_SIZE))
+	for (uint32_t i = 0; i < FS_DIR_SECTORS; i++) {
+		uint32_t sector = FS_DIR_START + i;
+		uint8_t *chunk  = bytes + i * SECTOR_SIZE;
+
+		int ok = writing ? ata_write_sector(sector, chunk)
+		                 : ata_read_sector(sector, chunk);
+		if (!ok)
 			return 0;
+	}
 
 	return 1;
 }
 
-static int write_directory(void)
+static int read_directory(void)  { return transfer_directory(0); }
+static int write_directory(void) { return transfer_directory(1); }
+
+/* Persist both pieces of metadata, in that order.
+ *
+ * Every operation that changes a file ends with exactly this, and "exactly"
+ * includes the ORDER, which is a correctness property rather than a style
+ * choice - see the note in fs_create. Three copies of an ordering rule is three
+ * chances to get it the wrong way round. */
+static int sync_metadata(void)
 {
-	const uint8_t *src = (const uint8_t *) directory;
+	if (!write_directory())
+		return 0;
 
-	for (uint32_t i = 0; i < FS_DIR_SECTORS; i++)
-		if (!ata_write_sector(FS_DIR_START + i, src + i * SECTOR_SIZE))
-			return 0;
-
-	return 1;
+	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
 }
 
+/* How many blocks a file of `size` bytes occupies. Rounded UP, because a file
+ * of one byte still uses a whole block - and forgetting the rounding gives an
+ * answer that is right for exact multiples and wrong for everything else. */
+static uint32_t blocks_for(uint32_t size)
+{
+	return KDIV_ROUND_UP(size, FS_BLOCK_SIZE);
+}
+
+/* The free-block map is a bitmap like the frame allocator's, so it uses the
+ * same helpers. Named in terms of blocks here because that is what these bits
+ * mean in this file. */
 static int block_used(uint32_t block)
 {
-	return (bitmap[block / 8] >> (block % 8)) & 1;
+	return bitmap_test(bitmap, block);
 }
 
 static void block_mark(uint32_t block, int used)
 {
-	if (used)
-		bitmap[block / 8] |= (uint8_t)(1 << (block % 8));
-	else
-		bitmap[block / 8] &= (uint8_t) ~(1 << (block % 8));
+	bitmap_assign(bitmap, block, used);
 }
 
 /* Take any free block.
@@ -258,8 +284,7 @@ static int write_at(struct fs_entry *entry, uint32_t offset,
 		/* A block index past the current end, or an unset slot, needs a new
 		 * block. Zero is a legitimate block number, so "unset" is signalled
 		 * by the index being beyond what the file has. */
-		if (index >= (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE ||
-		    block == 0xFFFFFFFFu) {
+		if (index >= blocks_for(entry->size) || block == 0xFFFFFFFFu) {
 			block = block_alloc();
 			if (block == 0xFFFFFFFFu)
 				return 0;                /* disk full */
@@ -298,11 +323,7 @@ int fs_create(const char *name, const void *data, uint32_t size)
 	/* Bound the name before copying it. The entry has a fixed 32 bytes and the
 	 * caller's string is whatever it is - this check is the only thing between
 	 * a long filename and a corrupted directory. */
-	uint32_t name_length = 0;
-	while (name[name_length] && name_length < FS_NAME_MAX)
-		name_length++;
-
-	if (name_length >= FS_NAME_MAX)
+	if (kstrlen(name) >= FS_NAME_MAX)
 		return 0;
 
 	if (find_entry(name))
@@ -313,8 +334,7 @@ int fs_create(const char *name, const void *data, uint32_t size)
 		return 0;                       /* directory full */
 
 	kmemset(entry, 0, sizeof(*entry));
-	for (uint32_t i = 0; i < name_length; i++)
-		entry->name[i] = name[i];
+	kstrlcpy(entry->name, name, sizeof(entry->name));
 
 	if (!write_at(entry, 0, (const uint8_t *) data, size)) {
 		kmemset(entry, 0, sizeof(*entry));   /* leave no half-made file */
@@ -328,10 +348,7 @@ int fs_create(const char *name, const void *data, uint32_t size)
 	 * wasted space; a directory entry pointing at data that was never written
 	 * is corruption. Ordering the writes so the cheaper failure is the likely
 	 * one is most of what journalling formalises. */
-	if (!write_directory())
-		return 0;
-
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return sync_metadata();
 }
 
 int fs_append(const char *name, const void *data, uint32_t size)
@@ -350,10 +367,7 @@ int fs_append(const char *name, const void *data, uint32_t size)
 
 	entry->size += size;
 
-	if (!write_directory())
-		return 0;
-
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return sync_metadata();
 }
 
 int fs_read(const char *name, void *buffer, uint32_t max, uint32_t *size_out)
@@ -405,7 +419,7 @@ int fs_delete(const char *name)
 	if (!entry)
 		return 0;
 
-	uint32_t blocks = (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+	uint32_t blocks = blocks_for(entry->size);
 
 	for (uint32_t i = 0; i < blocks; i++) {
 		uint32_t block = block_at(entry, i);
@@ -422,10 +436,7 @@ int fs_delete(const char *name)
 	 * contents. Deleting only removes the reference, which is why deleted
 	 * files are recoverable and why securely erasing something means
 	 * overwriting it deliberately. */
-	if (!write_directory())
-		return 0;
-
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return sync_metadata();
 }
 
 void fs_list(void)
@@ -443,13 +454,10 @@ void fs_list(void)
 
 		kprintf("  %s", directory[i].name);
 
-		uint32_t n = 0;
-		while (directory[i].name[n])
-			n++;
-		while (n++ < 20)
+		for (size_t n = kstrlen(directory[i].name); n < 20; n++)
 			kprintf(" ");
 
-		uint32_t blocks = (directory[i].size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+		uint32_t blocks = blocks_for(directory[i].size);
 
 		kprintf("%u bytes  %u block%s%s\n", directory[i].size, blocks,
 		        blocks == 1 ? "" : "s",

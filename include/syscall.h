@@ -23,11 +23,8 @@
 #define SYS_PIPE_WRITE 5   /* ebx = buffer, ecx = length */
 #define SYS_PIPE_READ  6   /* ebx = buffer, ecx = max, returns bytes read */
 
-struct task;
-
-/* Emit whatever the task has buffered but not yet terminated with a newline.
- * Called when a program exits or dies, so its last partial line is not lost. */
-void syscall_flush_output(struct task *t);
+/* Output buffering for SYS_WRITE belongs to the task that produced it - see
+ * task_write_buffered and task_flush_output in task.h. */
 
 void syscall_install(void);
 
