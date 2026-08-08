@@ -27,10 +27,35 @@ code you write and learn from it — so:
 ```
 ./build.sh          # compile only
 ./build.sh run      # compile, then boot in QEMU
+./build.sh test     # unit tests, on this machine, no QEMU
+./build.sh coverage # the tests plus a per-file line-coverage report
 ```
 
-Requires `base-devel` and `qemu-system-x86` on Arch. The build must stay
-warning-clean — in kernel code, warnings are usually real bugs.
+Requires `base-devel` and `qemu-system-x86` on Arch, plus `lib32-glibc` for the
+tests. The build must stay warning-clean — in kernel code, warnings are usually
+real bugs, and the tests are built with `-Wall -Wextra` too.
+
+## Tests
+
+`tests/` holds host-side unit tests for the parts of the kernel that are
+ordinary logic: `lib/string.c`, `mm/kheap.c`, `mm/pmm.c`, `kernel/pipe.c`,
+`kernel/lock.c`, `fs/fs.c`. Each is compiled with the real kernel flags and
+linked into a normal Linux program against fakes in `tests/support/` — a RAM
+disk for `ata_*`, a deterministic scheduler for `task_block`/`task_unblock`, a
+malloc-backed frame allocator, and a `kprintf` that captures output so a test
+can assert on what the kernel said.
+
+When changing one of those modules, run `./build.sh test`. When adding to them:
+
+- **The kernel code stays freestanding.** libc belongs only in `tests/`. Never
+  add an `#ifdef TEST` to kernel code to make it testable — if a module cannot
+  be tested, that is a fact about its design, not a reason to bend it.
+- Test the awkward cases. A test that only does the obvious thing tells you
+  nothing you did not already believe.
+- Hardware-bound code (`drivers/`, GDT, IDT, paging, the scheduler, the ELF
+  loader) is deliberately not tested here; faking a CPU would only test the
+  fake. Those are covered by booting and by the shell's `heaptest`, `racetest`,
+  `locktest` and `pipetest`.
 
 ## Files
 
@@ -59,6 +84,7 @@ mm/pmm.c             physical frame allocator, bitmap, driven by multiboot mmap
 mm/paging.c          page directory/tables, all RAM identity-mapped, CR0.WP, page fault handler
 mm/kheap.c           kmalloc/kfree, first-fit, splitting, coalescing, magic guards
 lib/string.c         kmemset, kmemcpy, kstrcmp, kstartswith
+tests/               host-side unit tests + fakes (the only place libc is allowed)
 include/             all headers
 ```
 

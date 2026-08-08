@@ -89,6 +89,50 @@ The `chmod` is needed any time you download a fresh `build.sh` — the executabl
 bit is a filesystem permission, not part of the file's contents, so it does not
 survive a download.
 
+## Tests
+
+```
+./build.sh test        run the unit tests
+./build.sh coverage    run them and report which lines were reached
+```
+
+These need 32-bit libc headers: `lib32-glibc` on Arch, `gcc-multilib` on
+Debian and Ubuntu. QEMU is not involved.
+
+Much of the kernel is ordinary logic that happens to live in a kernel — a
+first-fit allocator, a ring buffer, a block bitmap — and none of it needs a CPU
+in protected mode to be right or wrong. `./build.sh test` compiles those files
+**with the same flags the kernel build uses**, links them into normal Linux
+programs with fakes standing in for the disk, the scheduler and the frame
+allocator, and runs them in about a second:
+
+| suite | covers | lines reached |
+|-------|--------|---------------|
+| `string` | `lib/string.c` | 100% |
+| `kheap`  | `mm/kheap.c` — splitting, merging, the magic check | 97% |
+| `pmm`    | `mm/pmm.c` — the bitmap, reserved regions, runs | 97% |
+| `pipe`   | `kernel/pipe.c` — wraparound, blocking, wakeups | 98% |
+| `lock`   | `kernel/lock.c` — contention and FIFO wake order | 97% |
+| `fs`     | `fs/fs.c` — the directory, indirect blocks, disk failures | 93% |
+
+The code under test is unmodified: nothing was made "testable" by weakening it,
+and no `#ifdef TEST` appears anywhere in the kernel. What makes this work is
+that these modules already talk to the machine through narrow interfaces —
+`pmm_alloc_frames`, `ata_read_sector`, `task_block` — so the test provides its
+own versions and the module cannot tell.
+
+What this does **not** cover is everything that is inseparable from the
+hardware: `drivers/`, the GDT and IDT, paging, the scheduler, the ELF loader.
+Running them without a real CPU in protected mode would test the fakes rather
+than the code. Those are still checked the only way they can be — by booting,
+and with the `heaptest`, `racetest`, `locktest` and `pipetest` shell commands.
+
+The interesting part of a test suite is the cases that fail rather than the
+ones that pass, so these lean on the awkward ones: a heap block one byte too
+small to split, a pipe write that wraps the ring, a file that grows exactly
+past its last direct block, a disk that stops accepting writes halfway through
+formatting.
+
 ## Layout
 
 ```
@@ -121,6 +165,9 @@ Arthic/
 │   └── kheap.c       kmalloc / kfree — variable-sized allocation
 ├── lib/
 │   └── string.c      kmemset, kmemcpy, kstrcmp — no libc exists
+├── tests/            unit tests — run on this machine, not in QEMU
+│   ├── arthictest.h  the whole test framework, about a hundred lines
+│   └── support/      fake disk, fake scheduler, fake frame allocator
 ├── include/          every header
 └── build/            object files (generated, git-ignored)
 ```
