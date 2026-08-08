@@ -26,6 +26,15 @@ void     pmm_free_frame(uint32_t addr);
  * physical memory because devices do not go through the MMU. */
 uint32_t pmm_alloc_frames(uint32_t count);
 
+/* Give back `count` consecutive frames starting at `addr`.
+ *
+ * The counterpart to pmm_alloc_frames, and worth having because every caller
+ * that allocated a run had to write the same loop to release it - three of them
+ * in the loader alone, on paths taken only when something has gone wrong.
+ * Cleanup code that is written out by hand at every error return is cleanup
+ * code that eventually gets one of them wrong. */
+void     pmm_free_range(uint32_t addr, uint32_t count);
+
 /* One past the highest physical address the memory map mentioned. */
 uint32_t pmm_memory_top(void);
 

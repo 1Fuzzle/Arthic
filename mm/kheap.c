@@ -48,6 +48,7 @@
 #include "pmm.h"
 #include "string.h"
 #include "terminal.h"
+#include "util.h"
 
 #define HEAP_FRAMES 256                        /* 256 * 4 KB = 1 MB */
 #define HEAP_SIZE   (HEAP_FRAMES * PAGE_SIZE)
@@ -58,7 +59,7 @@
  * they fault outright on other architectures, and returning aligned memory is
  * what every caller assumes without asking. */
 #define ALIGNMENT 8
-#define ALIGN_UP(n) (((n) + (ALIGNMENT - 1)) & ~((size_t)(ALIGNMENT - 1)))
+#define ALIGN_UP(n) KALIGN_UP((size_t)(n), (size_t) ALIGNMENT)
 
 struct block {
 	uint32_t      magic;

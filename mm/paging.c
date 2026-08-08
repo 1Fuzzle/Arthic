@@ -80,6 +80,7 @@
 #include "usermode.h"
 #include "task.h"
 #include "syscall.h"
+#include "util.h"
 
 #define ENTRIES 1024
 
@@ -254,7 +255,7 @@ static void page_fault_handler(struct registers *regs)
 
 		struct task *t = task_current();
 
-		syscall_flush_output(t);
+		task_flush_output(t);
 
 		if (t && t->on_exit)
 			task_terminate();    /* a program dies; does not return */
@@ -318,9 +319,8 @@ void paging_init(void)
 	/* Now take write permission away from our own code and constants.
 	 * Everything from the start of .text to the end of .rodata becomes
 	 * read-only — present, but no PAGE_WRITE bit. */
-	uint32_t text_start = (uint32_t) &kernel_text_start & ~(PAGE_SIZE - 1);
-	uint32_t ro_end     = ((uint32_t) &kernel_rodata_end + PAGE_SIZE - 1)
-	                      & ~(PAGE_SIZE - 1);
+	uint32_t text_start = KALIGN_DOWN((uint32_t) &kernel_text_start, PAGE_SIZE);
+	uint32_t ro_end     = KALIGN_UP((uint32_t) &kernel_rodata_end, PAGE_SIZE);
 
 	for (uint32_t addr = text_start; addr < ro_end; addr += PAGE_SIZE) {
 		uint32_t *entry = entry_for(addr);
@@ -411,6 +411,18 @@ int paging_map(uint32_t virtual_addr, uint32_t physical_addr, uint32_t flags)
 	return 1;
 }
 
+int paging_map_range(uint32_t virtual_addr, uint32_t physical_addr,
+                     uint32_t pages, uint32_t flags)
+{
+	for (uint32_t i = 0; i < pages; i++) {
+		if (!paging_map(virtual_addr + i * PAGE_SIZE,
+		                physical_addr + i * PAGE_SIZE, flags))
+			return 0;
+	}
+
+	return 1;
+}
+
 void paging_unmap(uint32_t virtual_addr)
 {
 	uint32_t *entry = entry_for(virtual_addr);
@@ -425,7 +437,8 @@ void paging_make_user(uint32_t start, uint32_t end, int writable)
 {
 	uint32_t flags = PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
 
-	for (uint32_t addr = start & ~(PAGE_SIZE - 1); addr < end; addr += PAGE_SIZE) {
+	for (uint32_t addr = KALIGN_DOWN(start, PAGE_SIZE); addr < end;
+	     addr += PAGE_SIZE) {
 		/* PERMISSIONS ARE THE AND OF BOTH LEVELS.
 		 *
 		 * A translation walks the page directory and then the page table, and

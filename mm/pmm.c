@@ -34,6 +34,8 @@
 #include "multiboot.h"
 #include "string.h"
 #include "terminal.h"
+#include "util.h"
+#include "bitmap.h"
 
 /* Defined by linker.ld. We only ever take its ADDRESS — the value stored there
  * is meaningless. This trick is how C code learns about layout decisions the
@@ -44,30 +46,16 @@ extern uint32_t kernel_end;
  * Below this sits the BIOS, video memory and other things that are not ours. */
 #define KERNEL_START 0x100000
 
-static uint32_t *bitmap       = 0;
+/* One bit per frame, addressed by the shared helpers in bitmap.h - the same
+ * ones the filesystem uses for its block bitmap, because "one bit per thing"
+ * is the same operation whatever the thing is. */
+static uint8_t  *bitmap       = 0;
 static uint32_t  total_frames = 0;
 static uint32_t  used_frames  = 0;
 
-/* 32 bits per uint32_t, so frame N lives in word N/32 at bit N%32.
- *
- * The compiler turns / 32 into a shift and % 32 into a mask, so this is as
- * fast as writing the shifts by hand and considerably easier to read. Write it
- * the clear way; let the compiler do the clever way.
- */
-static void frame_set(uint32_t frame)
-{
-	bitmap[frame / 32] |= (1u << (frame % 32));
-}
-
-static void frame_clear(uint32_t frame)
-{
-	bitmap[frame / 32] &= ~(1u << (frame % 32));
-}
-
-static int frame_test(uint32_t frame)
-{
-	return (bitmap[frame / 32] & (1u << (frame % 32))) != 0;
-}
+static void frame_set(uint32_t frame)     { bitmap_set(bitmap, frame);   }
+static void frame_clear(uint32_t frame)   { bitmap_clear(bitmap, frame); }
+static int  frame_test(uint32_t frame)    { return bitmap_test(bitmap, frame); }
 
 /* Mark a physical address range used or free, rounding outward.
  *
@@ -80,7 +68,7 @@ static int frame_test(uint32_t frame)
 static void mark_region(uint32_t base, uint32_t length, int used)
 {
 	uint32_t first = base / PAGE_SIZE;
-	uint32_t last  = (base + length + PAGE_SIZE - 1) / PAGE_SIZE;
+	uint32_t last  = KDIV_ROUND_UP(base + length, PAGE_SIZE);
 
 	for (uint32_t f = first; f < last && f < total_frames; f++) {
 		if (used) {
@@ -133,11 +121,10 @@ void pmm_init(struct multiboot_info *mbi)
 	total_frames = (uint32_t)(highest / PAGE_SIZE);
 
 	/* Put the bitmap just past the kernel, page-aligned. */
-	uint32_t bitmap_addr = ((uint32_t)&kernel_end + PAGE_SIZE - 1)
-	                       & ~(PAGE_SIZE - 1);
-	bitmap = (uint32_t *) bitmap_addr;
+	uint32_t bitmap_addr = KALIGN_UP((uint32_t)&kernel_end, PAGE_SIZE);
+	bitmap = (uint8_t *) bitmap_addr;
 
-	uint32_t bitmap_bytes = (total_frames + 7) / 8;
+	uint32_t bitmap_bytes = KDIV_ROUND_UP(total_frames, 8);
 
 	/* Start with EVERYTHING marked used, then free only what the BIOS
 	 * explicitly told us is available.
@@ -223,6 +210,12 @@ uint32_t pmm_alloc_frames(uint32_t count)
 	}
 
 	return 0;   /* no contiguous run that large */
+}
+
+void pmm_free_range(uint32_t addr, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++)
+		pmm_free_frame(addr + i * PAGE_SIZE);
 }
 
 uint32_t pmm_memory_top(void)

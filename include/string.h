@@ -15,4 +15,18 @@ void *kmemcpy(void *dest, const void *src, size_t count);
 int   kstrcmp(const char *a, const char *b);
 int   kstartswith(const char *str, const char *prefix);
 
+/* Length of a NUL-terminated string, not counting the NUL. Walking to the
+ * terminator is genuinely how you find the end of a C string, so every caller
+ * that wants a length was writing this loop; now they do not. */
+size_t kstrlen(const char *str);
+
+/* Copy at most `size - 1` bytes and always terminate, so the destination is a
+ * valid string whatever the source was. `size` is the size of the DESTINATION,
+ * which is the argument order every safe copy uses and the reason it is safe:
+ * the bound belongs to the buffer, not to the data going into it.
+ *
+ * Returns the number of bytes written, excluding the terminator - callers that
+ * need to know where the copy stopped get it without walking the result. */
+size_t kstrlcpy(char *dest, const char *src, size_t size);
+
 #endif

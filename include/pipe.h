@@ -14,9 +14,9 @@
 
 #include <stdint.h>
 
-#define PIPE_CAPACITY 256
+#include "waitqueue.h"
 
-struct task;
+#define PIPE_CAPACITY 256
 
 struct pipe {
 	char     buffer[PIPE_CAPACITY];
@@ -24,8 +24,11 @@ struct pipe {
 	uint32_t write_pos;
 	uint32_t count;
 
-	struct task *readers_head, *readers_tail;
-	struct task *writers_head, *writers_tail;
+	/* Two queues, one per direction, both the same shared FIFO as a mutex
+	 * uses. A reader waits for the pipe to be non-empty and a writer for it
+	 * to be non-full, and nothing else about the waiting differs. */
+	struct wait_queue readers;
+	struct wait_queue writers;
 
 	uint32_t blocked_reads;
 	uint32_t blocked_writes;

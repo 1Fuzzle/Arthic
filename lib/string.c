@@ -61,3 +61,40 @@ int kstartswith(const char *str, const char *prefix)
 	}
 	return 1;
 }
+
+size_t kstrlen(const char *str)
+{
+	size_t length = 0;
+
+	while (str[length])
+		length++;
+
+	return length;
+}
+
+/* Bounded copy. Note the two things that make this safe and strcpy not: the
+ * loop stops at `size - 1` whatever the source looks like, and the terminator
+ * is written unconditionally afterwards rather than copied along with the
+ * bytes. A source longer than the destination is truncated, which is a
+ * decision - the alternative is refusing the copy, and callers here would all
+ * rather have a shortened name than a failure.
+ *
+ * `size == 0` means there is not even room for the terminator, so there is
+ * nothing correct to write at all.
+ */
+size_t kstrlcpy(char *dest, const char *src, size_t size)
+{
+	size_t i = 0;
+
+	if (size == 0)
+		return 0;
+
+	while (src[i] && i < size - 1) {
+		dest[i] = src[i];
+		i++;
+	}
+
+	dest[i] = '\0';
+
+	return i;
+}

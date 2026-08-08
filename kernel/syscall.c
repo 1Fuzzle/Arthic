@@ -64,12 +64,22 @@ void syscall_set_user_range(uint32_t start, uint32_t end)
  * check is how a great many exploits begin: ptr + length wraps past zero, the
  * comparison passes, and the kernel then copies gigabytes.
  */
+/* Is a single address inside the window ring 3 may reference?
+ *
+ * Both checks below start with this one, so it is worth having in one place:
+ * the range is state that can change, and a bounds check that consults a stale
+ * copy of the bounds is not a bounds check. */
+static int in_user_range(uint32_t addr)
+{
+	return addr >= user_range_start && addr < user_range_end;
+}
+
 static int user_buffer_ok(uint32_t ptr, uint32_t length)
 {
 	if (length == 0 || length > 4096)
 		return 0;
 
-	if (ptr < user_range_start || ptr >= user_range_end)
+	if (!in_user_range(ptr))
 		return 0;
 
 	if (ptr + length < ptr)          /* overflow */
@@ -83,7 +93,7 @@ static int user_buffer_ok(uint32_t ptr, uint32_t length)
 
 static int user_string_ok(uint32_t ptr, uint32_t max_length)
 {
-	if (ptr < user_range_start || ptr >= user_range_end)
+	if (!in_user_range(ptr))
 		return 0;
 
 	for (uint32_t i = 0; i < max_length; i++) {
@@ -99,46 +109,27 @@ static int user_string_ok(uint32_t ptr, uint32_t max_length)
 	return 0;                            /* too long */
 }
 
-/* Buffer a program's output until a line is complete.
+/* Line buffering for SYS_WRITE lives in task.c, next to the buffer it uses.
  *
- * Without this, `print("line "); print("12\n");` from one process can have
- * another process's output land between the two calls - which is exactly what
- * you see if you look: "line 1  [writer] finished" then "1 through the pipe".
- * Each write was atomic; the sequence was not.
- *
- * Real terminals do the same thing, and it is the other half of line
- * discipline - the shell already does the input side.
- *
- * The buffer is per-task, so two processes building lines at the same time do
- * not corrupt each other's. It flushes on a newline or when full; the second
- * condition matters because a program that never emits one must not be able to
- * make the kernel buffer without limit.
+ * It was written twice - once here and once there - which is how the reaper came
+ * to be flushing a buffer nothing ever wrote to, while a program that died
+ * mid-line lost its last line. Two copies of a piece of state is the bug, and
+ * one function using one buffer is the fix.
  */
-static void buffered_write(struct task *t, const char *text)
+
+/* The shared channel, created on first use.
+ *
+ * Both pipe syscalls needed the same "initialise it if nobody has yet" dance,
+ * and a lazily-created global is exactly the kind of thing where two copies of
+ * the check eventually disagree. */
+static struct pipe *ipc_channel(void)
 {
-	if (!t) {
-		terminal_write(text);        /* no task context - just print it */
-		return;
+	if (!ipc_ready) {
+		pipe_init(&ipc_pipe);
+		ipc_ready = 1;
 	}
 
-	for (uint32_t i = 0; text[i]; i++) {
-		t->outbuf[t->outlen++] = text[i];
-
-		if (text[i] == '\n' || t->outlen >= sizeof(t->outbuf) - 1) {
-			t->outbuf[t->outlen] = '\0';
-			terminal_write(t->outbuf);
-			t->outlen = 0;
-		}
-	}
-}
-
-void syscall_flush_output(struct task *t)
-{
-	if (t && t->outlen) {
-		t->outbuf[t->outlen] = '\0';
-		terminal_write(t->outbuf);
-		t->outlen = 0;
-	}
+	return &ipc_pipe;
 }
 
 static void syscall_dispatch(struct registers *regs)
@@ -153,7 +144,7 @@ static void syscall_dispatch(struct registers *regs)
 			regs->eax = (uint32_t) -1;
 			return;
 		}
-		buffered_write(task_current(), (const char *) regs->ebx);
+		task_write_buffered(task_current(), (const char *) regs->ebx);
 		regs->eax = 0;
 		return;
 
@@ -178,11 +169,6 @@ static void syscall_dispatch(struct registers *regs)
 	}
 
 	case SYS_PIPE_WRITE:
-		if (!ipc_ready) {
-			pipe_init(&ipc_pipe);
-			ipc_ready = 1;
-		}
-
 		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
 			kprintf("[syscall] rejected bad write buffer 0x%x len %u\n",
 			        regs->ebx, regs->ecx);
@@ -190,15 +176,11 @@ static void syscall_dispatch(struct registers *regs)
 			return;
 		}
 
-		regs->eax = pipe_write(&ipc_pipe, (const char *) regs->ebx, regs->ecx);
+		regs->eax = pipe_write(ipc_channel(), (const char *) regs->ebx,
+		                       regs->ecx);
 		return;
 
 	case SYS_PIPE_READ:
-		if (!ipc_ready) {
-			pipe_init(&ipc_pipe);
-			ipc_ready = 1;
-		}
-
 		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
 			kprintf("[syscall] rejected bad read buffer 0x%x len %u\n",
 			        regs->ebx, regs->ecx);
@@ -206,14 +188,14 @@ static void syscall_dispatch(struct registers *regs)
 			return;
 		}
 
-		regs->eax = pipe_read(&ipc_pipe, (char *) regs->ebx, regs->ecx);
+		regs->eax = pipe_read(ipc_channel(), (char *) regs->ebx, regs->ecx);
 		return;
 
 	case SYS_EXIT: {
 		struct task *t = task_current();
 
 		/* Anything half-written should still be seen. */
-		syscall_flush_output(t);
+		task_flush_output(t);
 
 		/* A loaded program is a task of its own and dies as one. The built-in
 		 * ring 3 demo runs on the shell's task, which must survive, so that

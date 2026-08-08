@@ -61,7 +61,6 @@ static void command_help(void)
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
 	kprintf("  append <name> <text>  add to the end of a file\n");
-	kprintf("  append <name> <text>  add to the end of a file\n");
 	kprintf("  rm <name>     delete a file\n");
 	kprintf("  bigfile       write and verify a 20 KB file (tests indirect blocks)\n");
 	kprintf("  df            filesystem usage\n");
@@ -305,6 +304,33 @@ static const char *argument_after(const char *line, const char *command)
 	return *p ? p : 0;
 }
 
+/* Copy the first word of `rest` into `out` and return what follows it, leading
+ * spaces skipped.
+ *
+ * `write`, `append` and `run` all want "a filename, then the rest of the line",
+ * and all three had their own copy of this loop. The bound is the caller's
+ * buffer size, so the filename limit lives with the buffer rather than being
+ * repeated at each call site. */
+static const char *split_word(const char *rest, char *out, size_t size)
+{
+	size_t i = kstrlcpy(out, rest, size);
+
+	/* kstrlcpy stops at the NUL, not at a space, so trim the word back to the
+	 * first space and continue from there in the source. */
+	for (size_t j = 0; j < i; j++) {
+		if (out[j] == ' ') {
+			out[j] = '\0';
+			i = j;
+			break;
+		}
+	}
+
+	while (rest[i] == ' ')
+		i++;
+
+	return rest + i;
+}
+
 static void command_format(void)
 {
 	if (!ata_sector_count()) {
@@ -335,40 +361,31 @@ static void command_df(void)
 	kprintf("  %u files\n", files);
 }
 
-static void command_write(const char *line)
+/* `write` and `append` differ only in which filesystem call they end with -
+ * same argument shape, same validation, same reporting. Two copies of the
+ * parsing meant a fix to one of them silently missing the other. */
+static void command_write(const char *line, int appending)
 {
-	const char *rest = argument_after(line, "write ");
+	const char *verb  = appending ? "append" : "write";
+	const char *rest  = argument_after(line, appending ? "append " : "write ");
 
-	if (!rest) {
-		kprintf("usage: write <name> <text>\n");
-		return;
-	}
-
-	/* Split again: name, then everything after the next space is content. */
 	char name[FS_NAME_MAX];
-	uint32_t i = 0;
-
-	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
-		name[i] = rest[i];
-		i++;
-	}
-	name[i] = '\0';
-
-	const char *text = rest + i;
-	while (*text == ' ')
-		text++;
-
-	uint32_t length = 0;
-	while (text[length])
-		length++;
+	const char *text = rest ? split_word(rest, name, sizeof(name)) : 0;
+	size_t length    = text ? kstrlen(text) : 0;
 
 	if (length == 0) {
-		kprintf("usage: write <name> <text>\n");
+		kprintf("usage: %s <name> <text>\n", verb);
 		return;
 	}
 
-	if (fs_create(name, text, length))
-		kprintf("wrote %u bytes to %s\n", length, name);
+	int ok = appending ? fs_append(name, text, length)
+	                   : fs_create(name, text, length);
+
+	if (ok)
+		kprintf("%s %u bytes to %s\n", appending ? "appended" : "wrote",
+		        (uint32_t) length, name);
+	else if (appending)
+		kprintf("could not append to %s\n", name);
 	else
 		kprintf("could not write %s (exists, full, or no space)\n", name);
 }
@@ -392,43 +409,6 @@ static void command_cat(const char *line)
 
 	contents[size] = '\0';
 	kprintf("%s\n", contents);
-}
-
-static void command_append(const char *line)
-{
-	const char *rest = argument_after(line, "append ");
-
-	if (!rest) {
-		kprintf("usage: append <name> <text>\n");
-		return;
-	}
-
-	char name[FS_NAME_MAX];
-	uint32_t i = 0;
-
-	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
-		name[i] = rest[i];
-		i++;
-	}
-	name[i] = '\0';
-
-	const char *text = rest + i;
-	while (*text == ' ')
-		text++;
-
-	uint32_t length = 0;
-	while (text[length])
-		length++;
-
-	if (length == 0) {
-		kprintf("usage: append <name> <text>\n");
-		return;
-	}
-
-	if (fs_append(name, text, length))
-		kprintf("appended %u bytes to %s\n", length, name);
-	else
-		kprintf("could not append to %s\n", name);
 }
 
 /* Create a file large enough to need the indirect block, then read it back and
@@ -532,19 +512,8 @@ static void command_run(const char *line)
 		return;
 	}
 
-	/* Split the name from whatever follows it. */
 	char name[FS_NAME_MAX];
-	uint32_t i = 0;
-
-	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
-		name[i] = rest[i];
-		i++;
-	}
-	name[i] = '\0';
-
-	const char *args = rest + i;
-	while (*args == ' ')
-		args++;
+	const char *args = split_word(rest, name, sizeof(name));
 
 	loader_run(name, args);
 }
@@ -566,11 +535,7 @@ static void producer_thread(void)
 		message[8]  = (char)('0' + (i / 10) % 10);
 		message[9]  = (char)('0' + i % 10);
 
-		uint32_t length = 0;
-		while (message[length])
-			length++;
-
-		pipe_write(&demo_pipe, message, length);
+		pipe_write(&demo_pipe, message, kstrlen(message));
 	}
 
 	pipe_write(&demo_pipe, "END", 3);
@@ -743,13 +708,11 @@ static void execute(const char *line)
 	else if (kstrcmp(line, "format") == 0)
 		command_format();
 	else if (kstartswith(line, "write "))
-		command_write(line);
+		command_write(line, 0);
 	else if (kstartswith(line, "cat "))
 		command_cat(line);
 	else if (kstartswith(line, "append "))
-		command_append(line);
-	else if (kstartswith(line, "append "))
-		command_append(line);
+		command_write(line, 1);
 	else if (kstartswith(line, "rm "))
 		command_rm(line);
 	else if (kstrcmp(line, "spin") == 0)
