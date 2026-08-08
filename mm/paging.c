@@ -396,6 +396,57 @@ void paging_make_user(uint32_t start, uint32_t end, int writable)
 	}
 }
 
+/* Ask the page tables what ring 3 is allowed to do with a range of addresses.
+ *
+ * The rule the hardware applies is that permissions are the AND of the two
+ * levels, so both are checked here: the directory entry for the 4 MB region,
+ * then the table entry for each individual page. Miss the directory and a
+ * kernel page under a user-accessible region looks reachable when it is not -
+ * and, worse, the reverse mistake would let a pointer through.
+ *
+ * Walking page by page rather than checking only the first and last matters:
+ * a range can begin and end on mapped user pages with something entirely
+ * different in the middle. `addr & ~(PAGE_SIZE - 1)` clears the low 12 bits,
+ * which is how you round an address down to the page it lives on.
+ */
+int paging_user_access_ok(uint32_t addr, uint32_t length, int need_write)
+{
+	if (length == 0)
+		return 0;
+
+	/* The end address is computed in a way that cannot wrap. A range whose
+	 * end overflows past zero would otherwise produce a last address LOWER
+	 * than the first, and every page in between would go unchecked - the
+	 * classic way a bounds check is talked out of doing its job. */
+	if (addr > 0xFFFFFFFFu - (length - 1))
+		return 0;
+
+	uint32_t last = addr + (length - 1);
+
+	uint32_t required = PAGE_PRESENT | PAGE_USER;
+	if (need_write)
+		required |= PAGE_WRITE;
+
+	for (uint32_t page = addr & ~(PAGE_SIZE - 1);
+	     page <= (last & ~(PAGE_SIZE - 1));
+	     page += PAGE_SIZE) {
+
+		if ((page_directory[page >> 22] & required) != required)
+			return 0;
+
+		uint32_t *entry = entry_for(page);
+		if (!entry || (*entry & required) != required)
+			return 0;
+
+		/* The loop variable is a page address, so the last page in the 4 GB
+		 * space would wrap to zero on the increment and loop forever. */
+		if (page > 0xFFFFFFFFu - PAGE_SIZE)
+			break;
+	}
+
+	return 1;
+}
+
 /* ---- address spaces -------------------------------------------------------- */
 
 uint32_t paging_kernel_directory(void)

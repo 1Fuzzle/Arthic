@@ -42,6 +42,21 @@ int paging_probe_write(volatile uint32_t *addr, uint32_t value);
 /* Mark a range as accessible from ring 3. */
 void paging_make_user(uint32_t start, uint32_t end, int writable);
 
+/* Could ring 3 itself touch every byte of [addr, addr + length) in the address
+ * space that is currently loaded? Returns 1 if it could, 0 otherwise.
+ *
+ * This is the question a syscall needs to ask about a pointer it was handed.
+ * Asking the page tables rather than comparing against a remembered address
+ * range means the answer cannot disagree with what the hardware would do, and
+ * it is per address space for free - the tables being consulted are the ones
+ * the CPU is using for this task.
+ *
+ * `need_write` distinguishes a buffer the kernel reads from one it writes into.
+ * A pointer into the program's own code passes the first and must fail the
+ * second, or the kernel becomes the way a program edits its read-only pages.
+ */
+int paging_user_access_ok(uint32_t addr, uint32_t length, int need_write);
+
 /* Map one page of virtual memory onto a physical frame, creating the page
  * table if that region has none yet. Returns 0 if it could not allocate a
  * table. */
