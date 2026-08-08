@@ -61,15 +61,20 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	/* Confirm we were actually loaded by a multiboot loader before trusting
 	 * the pointer it supposedly left us. */
 	if (magic != MULTIBOOT_BOOTLOADER_MAGIC) {
-		terminal_set_colour(vga_entry_colour(VGA_LIGHT_RED, VGA_BLACK));
-		kprintf("bad multiboot magic: 0x%x - refusing to continue\n", magic);
-		for (;;)
-			__asm__ volatile ("cli; hlt");
+		kprintf("bad multiboot magic: 0x%x\n", magic);
+		kpanic("not loaded by a multiboot bootloader");
 	}
 
 	pmm_init(mbi);
 	paging_init();
-	kheap_init();
+
+	/* The heap and the scheduler are load-bearing, and a kernel that carried
+	 * on after one of them failed would appear to boot and then misbehave much
+	 * later, somewhere unrelated: no heap means every kmalloc returns NULL,
+	 * no scheduler means every task_create fails. Failing here, loudly, is the
+	 * honest option - there is nothing to fall back on. */
+	if (!kheap_init())
+		kpanic("kheap: could not reserve the kernel heap");
 
 	/* The TSS needs a kernel stack address; usermode_run refines it per
 	 * entry, so any sane value will do here. */
@@ -80,12 +85,23 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	}
 
 	syscall_install();
-	usermode_init();
-	task_init();
+
+	if (!task_init())
+		kpanic("task: could not allocate the initial task");
+
+	/* Ring 3 is the part that is genuinely optional - everything else works
+	 * without it - so this reports and carries on rather than halting. */
+	int usermode_ready = usermode_init();
+	if (!usermode_ready)
+		kprintf("usermode: no memory for a user stack - ring 3 unavailable\n");
 
 	if (ata_init()) {
+		/* Say WHICH reason. "no ArthicFS on it" was true for a disk that had
+		 * never been formatted and equally for one whose superblock could not
+		 * be read at all, and those call for different responses. */
 		if (!fs_mount())
-			kprintf("Disk found, no ArthicFS on it - run 'format'.\n");
+			kprintf("Disk found, not mounted: %s - try 'format'.\n",
+			        fs_error_string(fs_last_error()));
 	}
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
@@ -101,7 +117,8 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 		kprintf("Heap  ready: %u KB, first-fit with coalescing.\n",
 		        heap_total / 1024);
 	}
-	kprintf("TSS + ring 3 ready. Syscall gate at int 0x80, DPL 3.\n");
+	kprintf("TSS + ring 3 %s. Syscall gate at int 0x80, DPL 3.\n",
+	        usermode_ready ? "ready" : "UNAVAILABLE");
 	kprintf("Scheduler running: preemptive round robin, with sleeping.\n");
 	if (ata_sector_count())
 		kprintf("Disk: %u sectors, %u MB. Filesystem %s.\n",

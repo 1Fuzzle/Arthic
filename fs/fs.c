@@ -30,6 +30,47 @@ static uint8_t bitmap[SECTOR_SIZE];
 
 static struct fs_entry directory[FS_MAX_FILES];
 
+/* ---- reporting why something failed ---------------------------------------
+ *
+ * One variable holding the reason for the most recent failure, in the style of
+ * errno. `fail` sets it and returns 0 in one expression, so every failure path
+ * below reads `return fail(FS_ERR_IO);` - short enough that there is no
+ * temptation to leave the reason out.
+ */
+static enum fs_error last_error = FS_OK;
+
+static int fail(enum fs_error error)
+{
+	last_error = error;
+	return 0;
+}
+
+enum fs_error fs_last_error(void)
+{
+	return last_error;
+}
+
+const char *fs_error_string(enum fs_error error)
+{
+	switch (error) {
+	case FS_OK:              return "no error";
+	case FS_ERR_NOT_MOUNTED: return "no filesystem mounted";
+	case FS_ERR_NO_DISK:     return "no disk, or it is too small";
+	case FS_ERR_IO:          return "disk read or write failed";
+	case FS_ERR_BAD_MAGIC:   return "not an ArthicFS disk";
+	case FS_ERR_NOT_FOUND:   return "no such file";
+	case FS_ERR_EXISTS:      return "already exists";
+	case FS_ERR_NAME:        return "bad or too long a name";
+	case FS_ERR_DIR_FULL:    return "directory full";
+	case FS_ERR_DISK_FULL:   return "disk full";
+	case FS_ERR_TOO_BIG:     return "file at its maximum size";
+	case FS_ERR_CORRUPT:     return "corrupt block list";
+	case FS_ERR_TRUNCATED:   return "truncated - buffer too small";
+	}
+
+	return "unknown error";
+}
+
 /* ---- directory and bitmap ------------------------------------------------- */
 
 static int read_directory(void)
@@ -79,11 +120,49 @@ static void block_mark(uint32_t block, int used)
  * filesystems still try to keep a file's blocks near each other even though
  * they no longer have to.
  */
+/* Blocks claimed by the operation currently in progress.
+ *
+ * The bitmap on disk is only rewritten once an operation has finished, so
+ * until then block_alloc has changed nothing but memory. That is what makes
+ * undoing possible - and undoing is necessary, because a write that fails half
+ * way used to leave its blocks marked used in memory with nothing referring to
+ * them. They were lost until the next `format`: a leak the caller was never
+ * told about, and one that made the in-memory bitmap disagree with the disk.
+ *
+ * One file can occupy at most FS_MAX_BLOCKS blocks plus its indirect block,
+ * which bounds this list. */
+static uint32_t claimed[FS_MAX_BLOCKS + 1];
+static uint32_t claimed_count = 0;
+
+static void claim_begin(void)
+{
+	claimed_count = 0;
+}
+
+static void claim_rollback(void)
+{
+	for (uint32_t i = 0; i < claimed_count; i++)
+		block_mark(claimed[i], 0);
+
+	claimed_count = 0;
+}
+
 static uint32_t block_alloc(void)
 {
 	for (uint32_t b = 0; b < super.total_blocks; b++) {
 		if (!block_used(b)) {
 			block_mark(b, 1);
+
+			/* The bound cannot be exceeded by a correct caller; refusing
+			 * rather than writing past the array is the only safe answer if
+			 * one ever is. */
+			if (claimed_count < FS_MAX_BLOCKS + 1)
+				claimed[claimed_count++] = b;
+			else {
+				block_mark(b, 0);
+				return 0xFFFFFFFFu;
+			}
+
 			return b;
 		}
 	}
@@ -100,15 +179,23 @@ static uint32_t block_at(const struct fs_entry *entry, uint32_t index)
 	if (index < FS_DIRECT_BLOCKS)
 		return entry->direct[index];
 
-	if (!entry->indirect)
-		return 0xFFFFFFFFu;
-
-	if (!ata_read_sector(super.data_start + entry->indirect, indirect_buffer))
-		return 0xFFFFFFFFu;
-
 	uint32_t slot = index - FS_DIRECT_BLOCKS;
-	if (slot >= FS_PER_INDIRECT)
+
+	/* Every path out of here returns the same 0xFFFFFFFF, but the reasons are
+	 * not the same thing at all: an index past the end of the file is the
+	 * caller asking a silly question, while a failed read of the indirect block
+	 * is the disk breaking underneath a perfectly good one. The sentinel cannot
+	 * carry that difference, so it is recorded separately - otherwise a dying
+	 * disk reports itself as "no such block". */
+	if (slot >= FS_PER_INDIRECT || !entry->indirect) {
+		last_error = FS_ERR_CORRUPT;
 		return 0xFFFFFFFFu;
+	}
+
+	if (!ata_read_sector(super.data_start + entry->indirect, indirect_buffer)) {
+		last_error = FS_ERR_IO;
+		return 0xFFFFFFFFu;
+	}
 
 	return ((uint32_t *) indirect_buffer)[slot];
 }
@@ -123,7 +210,7 @@ static int block_set(struct fs_entry *entry, uint32_t index, uint32_t block)
 
 	uint32_t slot = index - FS_DIRECT_BLOCKS;
 	if (slot >= FS_PER_INDIRECT)
-		return 0;                        /* file has hit its ceiling */
+		return fail(FS_ERR_TOO_BIG);     /* file has hit its ceiling */
 
 	if (!entry->indirect) {
 		/* The indirect block is itself a block, taken from the same pool.
@@ -131,40 +218,48 @@ static int block_set(struct fs_entry *entry, uint32_t index, uint32_t block)
 		 * need it - small files never pay. */
 		uint32_t b = block_alloc();
 		if (b == 0xFFFFFFFFu)
-			return 0;
-
-		entry->indirect = b;
+			return fail(FS_ERR_DISK_FULL);
 
 		kmemset(indirect_buffer, 0, SECTOR_SIZE);
 		if (!ata_write_sector(super.data_start + b, indirect_buffer))
-			return 0;
+			return fail(FS_ERR_IO);
+
+		/* Only recorded in the entry once the block behind it exists and is
+		 * zeroed. Setting it first and then failing left the file pointing at
+		 * an indirect block full of whatever was there before - a list of
+		 * garbage block numbers presented as the file's own. */
+		entry->indirect = b;
 	}
 
 	if (!ata_read_sector(super.data_start + entry->indirect, indirect_buffer))
-		return 0;
+		return fail(FS_ERR_IO);
 
 	((uint32_t *) indirect_buffer)[slot] = block;
 
-	return ata_write_sector(super.data_start + entry->indirect, indirect_buffer);
+	if (!ata_write_sector(super.data_start + entry->indirect, indirect_buffer))
+		return fail(FS_ERR_IO);
+
+	return 1;
 }
 
 /* ---- mount and format ----------------------------------------------------- */
 
 int fs_mount(void)
 {
-	mounted = 0;
+	mounted    = 0;
+	last_error = FS_OK;
 
 	if (!ata_read_sector(0, &super))
-		return 0;
+		return fail(FS_ERR_IO);
 
 	if (super.magic != FS_MAGIC)
-		return 0;                       /* not ours, or an older format */
+		return fail(FS_ERR_BAD_MAGIC);  /* not ours, or an older format */
 
 	if (!read_directory())
-		return 0;
+		return fail(FS_ERR_IO);
 
 	if (!ata_read_sector(FS_BITMAP_SECTOR, bitmap))
-		return 0;
+		return fail(FS_ERR_IO);
 
 	mounted = 1;
 	return 1;
@@ -174,8 +269,10 @@ int fs_format(void)
 {
 	uint32_t sectors = ata_sector_count();
 
+	last_error = FS_OK;
+
 	if (sectors <= FS_DATA_START)
-		return 0;
+		return fail(FS_ERR_NO_DISK);
 
 	uint32_t data_blocks = sectors - FS_DATA_START;
 
@@ -195,12 +292,16 @@ int fs_format(void)
 	kmemset(directory, 0, sizeof(directory));
 	kmemset(bitmap, 0, sizeof(bitmap));
 
-	if (!ata_write_sector(0, &super))
-		return 0;
+	/* The superblock goes last on purpose. It is what fs_mount looks at, so a
+	 * format that dies part way through leaves a disk that still fails to
+	 * mount rather than one that mounts and presents a directory that was never
+	 * written. */
 	if (!write_directory())
-		return 0;
+		return fail(FS_ERR_IO);
 	if (!ata_write_sector(FS_BITMAP_SECTOR, bitmap))
-		return 0;
+		return fail(FS_ERR_IO);
+	if (!ata_write_sector(0, &super))
+		return fail(FS_ERR_IO);
 
 	mounted = 1;
 	return 1;
@@ -250,7 +351,7 @@ static int write_at(struct fs_entry *entry, uint32_t offset,
 			chunk = size - written;
 
 		if (index >= FS_MAX_BLOCKS)
-			return 0;                    /* file is as big as it can get */
+			return fail(FS_ERR_TOO_BIG); /* file is as big as it can get */
 
 		uint32_t block = block_at(entry, index);
 		int fresh = 0;
@@ -262,8 +363,10 @@ static int write_at(struct fs_entry *entry, uint32_t offset,
 		    block == 0xFFFFFFFFu) {
 			block = block_alloc();
 			if (block == 0xFFFFFFFFu)
-				return 0;                /* disk full */
+				return fail(FS_ERR_DISK_FULL);
 
+			/* block_set records its own reason for failing, so pass that
+			 * along rather than flattening every cause into one. */
 			if (!block_set(entry, index, block))
 				return 0;
 
@@ -277,12 +380,12 @@ static int write_at(struct fs_entry *entry, uint32_t offset,
 		if (fresh)
 			kmemset(sector_buffer, 0, SECTOR_SIZE);
 		else if (!ata_read_sector(super.data_start + block, sector_buffer))
-			return 0;
+			return fail(FS_ERR_IO);
 
 		kmemcpy(sector_buffer + within, data + written, chunk);
 
 		if (!ata_write_sector(super.data_start + block, sector_buffer))
-			return 0;
+			return fail(FS_ERR_IO);
 
 		written += chunk;
 	}
@@ -290,10 +393,51 @@ static int write_at(struct fs_entry *entry, uint32_t offset,
 	return 1;
 }
 
+/* Push the bitmap and the directory to disk after a change.
+ *
+ * The ORDER is the interesting part, and it is not the same in both
+ * directions:
+ *
+ *   growing a file - bitmap first, then the directory. If the second write
+ *     fails, the disk holds blocks marked used that no file claims: wasted
+ *     space, and nothing worse.
+ *
+ *   deleting a file - directory first, then the bitmap. The survivable failure
+ *     is again leaked blocks.
+ *
+ * Do it the other way round and the failure leaves a directory entry naming
+ * blocks the bitmap believes are free - which the next allocation hands to
+ * another file, and then two files share sectors. Both writes are metadata, so
+ * the rule cannot be "metadata last"; it is that a reference must never outlive
+ * the record of what it points at. */
+static int write_metadata(int freeing)
+{
+	if (freeing) {
+		if (!write_directory())
+			return fail(FS_ERR_IO);
+		if (!ata_write_sector(FS_BITMAP_SECTOR, bitmap))
+			return fail(FS_ERR_IO);
+		return 1;
+	}
+
+	if (!ata_write_sector(FS_BITMAP_SECTOR, bitmap))
+		return fail(FS_ERR_IO);
+	if (!write_directory())
+		return fail(FS_ERR_IO);
+
+	return 1;
+}
+
 int fs_create(const char *name, const void *data, uint32_t size)
 {
-	if (!mounted || !name || name[0] == '\0')
-		return 0;
+	last_error = FS_OK;
+	claim_begin();
+
+	if (!mounted)
+		return fail(FS_ERR_NOT_MOUNTED);
+
+	if (!name || name[0] == '\0')
+		return fail(FS_ERR_NAME);
 
 	/* Bound the name before copying it. The entry has a fixed 32 bytes and the
 	 * caller's string is whatever it is - this check is the only thing between
@@ -303,14 +447,14 @@ int fs_create(const char *name, const void *data, uint32_t size)
 		name_length++;
 
 	if (name_length >= FS_NAME_MAX)
-		return 0;
+		return fail(FS_ERR_NAME);
 
 	if (find_entry(name))
-		return 0;                       /* already exists */
+		return fail(FS_ERR_EXISTS);
 
 	struct fs_entry *entry = find_free_entry();
 	if (!entry)
-		return 0;                       /* directory full */
+		return fail(FS_ERR_DIR_FULL);
 
 	kmemset(entry, 0, sizeof(*entry));
 	for (uint32_t i = 0; i < name_length; i++)
@@ -318,56 +462,80 @@ int fs_create(const char *name, const void *data, uint32_t size)
 
 	if (!write_at(entry, 0, (const uint8_t *) data, size)) {
 		kmemset(entry, 0, sizeof(*entry));   /* leave no half-made file */
-		return 0;
+		claim_rollback();
+		return 0;                            /* write_at recorded why */
 	}
 
 	entry->size = size;
 	entry->used = 1;
 
-	/* Metadata last. If power fails midway, an unreferenced data block is
-	 * wasted space; a directory entry pointing at data that was never written
-	 * is corruption. Ordering the writes so the cheaper failure is the likely
-	 * one is most of what journalling formalises. */
-	if (!write_directory())
+	if (!write_metadata(0)) {
+		/* Nothing on disk mentions this file, so memory must not either.
+		 * Leaving the entry behind would have the directory in RAM disagree
+		 * with the one on the disk, and the next successful write would
+		 * commit that disagreement. */
+		kmemset(entry, 0, sizeof(*entry));
+		claim_rollback();
 		return 0;
+	}
 
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return 1;
 }
 
 int fs_append(const char *name, const void *data, uint32_t size)
 {
+	last_error = FS_OK;
+	claim_begin();
+
 	if (!mounted)
-		return 0;
+		return fail(FS_ERR_NOT_MOUNTED);
 
 	struct fs_entry *entry = find_entry(name);
 	if (!entry)
-		return 0;
+		return fail(FS_ERR_NOT_FOUND);
+
+	/* Kept so a failure can put it back. The recorded length is the only thing
+	 * that says which of the file's blocks hold real data, and a block that was
+	 * allocated but never written must not end up inside it. */
+	uint32_t previous_size = entry->size;
 
 	/* The whole point of block mapping: this simply was not possible before,
 	 * because a contiguous file had nowhere to grow into. */
-	if (!write_at(entry, entry->size, (const uint8_t *) data, size))
+	if (!write_at(entry, entry->size, (const uint8_t *) data, size)) {
+		entry->size = previous_size;
+		claim_rollback();
 		return 0;
+	}
 
 	entry->size += size;
 
-	if (!write_directory())
+	if (!write_metadata(0)) {
+		entry->size = previous_size;
+		claim_rollback();
 		return 0;
+	}
 
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return 1;
 }
 
 int fs_read(const char *name, void *buffer, uint32_t max, uint32_t *size_out)
 {
+	last_error = FS_OK;
+
 	if (!mounted)
-		return 0;
+		return fail(FS_ERR_NOT_MOUNTED);
 
 	struct fs_entry *entry = find_entry(name);
 	if (!entry)
-		return 0;
+		return fail(FS_ERR_NOT_FOUND);
 
 	uint32_t size = entry->size;
-	if (size > max)
+	int truncated = 0;
+
+	if (size > max) {
 		size = max;                     /* truncate rather than overflow */
+		truncated = 1;
+	}
 
 	uint8_t *dest = (uint8_t *) buffer;
 	uint32_t copied = 0;
@@ -376,10 +544,10 @@ int fs_read(const char *name, void *buffer, uint32_t max, uint32_t *size_out)
 	while (copied < size) {
 		uint32_t block = block_at(entry, index);
 		if (block == 0xFFFFFFFFu)
-			return 0;
+			return 0;                   /* block_at recorded why */
 
 		if (!ata_read_sector(super.data_start + block, sector_buffer))
-			return 0;
+			return fail(FS_ERR_IO);
 
 		uint32_t chunk = size - copied;
 		if (chunk > FS_BLOCK_SIZE)
@@ -393,17 +561,26 @@ int fs_read(const char *name, void *buffer, uint32_t max, uint32_t *size_out)
 	if (size_out)
 		*size_out = size;
 
+	/* Success, but not the whole file. Reported through the error code rather
+	 * than a failed return, because the bytes in the buffer are real and the
+	 * caller may well want them - it just must not be allowed to believe it has
+	 * everything. */
+	if (truncated)
+		last_error = FS_ERR_TRUNCATED;
+
 	return 1;
 }
 
 int fs_delete(const char *name)
 {
+	last_error = FS_OK;
+
 	if (!mounted)
-		return 0;
+		return fail(FS_ERR_NOT_MOUNTED);
 
 	struct fs_entry *entry = find_entry(name);
 	if (!entry)
-		return 0;
+		return fail(FS_ERR_NOT_FOUND);
 
 	uint32_t blocks = (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
 
@@ -422,10 +599,9 @@ int fs_delete(const char *name)
 	 * contents. Deleting only removes the reference, which is why deleted
 	 * files are recoverable and why securely erasing something means
 	 * overwriting it deliberately. */
-	if (!write_directory())
-		return 0;
+	last_error = FS_OK;   /* block_at may have set it while walking the list */
 
-	return ata_write_sector(FS_BITMAP_SECTOR, bitmap);
+	return write_metadata(1);
 }
 
 void fs_list(void)

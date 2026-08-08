@@ -81,6 +81,19 @@ static int wait_not_busy(void)
 	return 0;
 }
 
+/* Did the drive report a problem?
+ *
+ * ERR and DF are latched in the status register and stay set until the next
+ * command, so they can be read AFTER a transfer as well as before one. That
+ * matters: a drive can accept a command, hand the data over, and only then
+ * decide the operation failed. Checking beforehand alone means those failures
+ * are reported as success, which is worse than not checking at all - the
+ * filesystem then writes its metadata believing the data landed. */
+static int transfer_failed(void)
+{
+	return (inb(ATA_STATUS) & (STATUS_ERR | STATUS_DF)) != 0;
+}
+
 static int wait_ready(void)
 {
 	if (!wait_not_busy())
@@ -159,6 +172,9 @@ int ata_read_sector(uint32_t lba, void *buffer)
 	for (int i = 0; i < SECTOR_SIZE / 2; i++)
 		out[i] = inw(ATA_DATA);
 
+	if (transfer_failed())
+		return 0;
+
 	return 1;
 }
 
@@ -178,11 +194,20 @@ int ata_write_sector(uint32_t lba, const void *buffer)
 	for (int i = 0; i < SECTOR_SIZE / 2; i++)
 		outw(ATA_DATA, in[i]);
 
+	if (transfer_failed())
+		return 0;
+
 	/* Without this the drive may hold the data in its own cache and report
 	 * success before anything reaches the platter. On a real machine that is
-	 * the difference between a file surviving a power cut and not. */
+	 * the difference between a file surviving a power cut and not.
+	 *
+	 * The flush can itself fail, so its result is checked. Issuing a flush and
+	 * discarding the answer buys the appearance of durability rather than
+	 * durability - the one thing the flush exists to provide. */
 	outb(ATA_COMMAND, CMD_FLUSH);
-	wait_not_busy();
+
+	if (!wait_not_busy() || transfer_failed())
+		return 0;
 
 	return 1;
 }

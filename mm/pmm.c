@@ -101,11 +101,8 @@ void pmm_init(struct multiboot_info *mbi)
 {
 	/* Without a memory map we would be guessing, and guessing about which
 	 * physical addresses are real RAM is not something to do. */
-	if (!(mbi->flags & MULTIBOOT_INFO_MEM_MAP)) {
-		kprintf("pmm: no memory map from bootloader, cannot continue\n");
-		for (;;)
-			__asm__ volatile ("cli; hlt");
-	}
+	if (!(mbi->flags & MULTIBOOT_INFO_MEM_MAP))
+		kpanic("pmm: no memory map from the bootloader");
 
 	/* Pass one: find the highest usable address, so we know how many frames
 	 * the bitmap must cover. */
@@ -230,17 +227,34 @@ uint32_t pmm_memory_top(void)
 	return total_frames * PAGE_SIZE;
 }
 
-void pmm_free_frame(uint32_t addr)
+int pmm_free_frame(uint32_t addr)
 {
 	uint32_t frame = addr / PAGE_SIZE;
 
-	/* Freeing something already free means a double-free bug somewhere.
-	 * Silently ignoring it hides the bug; refusing to decrement at least
-	 * keeps the accounting honest. */
-	if (frame < total_frames && frame_test(frame)) {
-		frame_clear(frame);
-		used_frames--;
+	/* Freeing something already free means a double-free bug somewhere, and an
+	 * address outside the bitmap means the caller is confused about what it
+	 * owns. Refusing to decrement keeps the accounting honest, but the previous
+	 * version stopped there and said nothing - so the bug happened, the count
+	 * quietly stopped matching reality, and the next symptom appeared somewhere
+	 * with no connection to the cause.
+	 *
+	 * Now it is reported and the caller is told. Not a panic: a leaked or
+	 * refused frame is survivable, and killing the machine over one would make
+	 * a small bug fatal. */
+	if (frame >= total_frames) {
+		kprintf("pmm: refused to free 0x%x - outside physical memory\n", addr);
+		return 0;
 	}
+
+	if (!frame_test(frame)) {
+		kprintf("pmm: double free of frame at 0x%x - ignoring\n", addr);
+		return 0;
+	}
+
+	frame_clear(frame);
+	used_frames--;
+
+	return 1;
 }
 
 uint32_t pmm_total_frames(void) { return total_frames; }

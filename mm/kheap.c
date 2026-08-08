@@ -86,17 +86,17 @@ static struct block *header_of(void *payload)
 	return (struct block *)((uint8_t *) payload - HEADER_SIZE);
 }
 
-void kheap_init(void)
+int kheap_init(void)
 {
 	/* One contiguous run. It has to be contiguous because the heap hands out
 	 * regions that may span page boundaries, and a caller that gets 8 KB
 	 * expects 8 KB of consecutive addresses. */
 	uint32_t base = pmm_alloc_frames(HEAP_FRAMES);
 
-	if (!base) {
-		kprintf("kheap: could not reserve %u KB\n", HEAP_SIZE / 1024);
-		return;
-	}
+	/* Report the failure rather than leaving heap_start at 0 and letting every
+	 * later kmalloc return NULL for reasons the caller cannot see. */
+	if (!base)
+		return 0;
 
 	heap_start = (struct block *) base;
 	heap_bytes = HEAP_SIZE;
@@ -108,6 +108,8 @@ void kheap_init(void)
 	heap_start->free  = 1;
 	heap_start->next  = 0;
 	heap_start->prev  = 0;
+
+	return 1;
 }
 
 /* Split `b` so it holds exactly `size` bytes, with the remainder becoming a new

@@ -13,7 +13,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
-void  kheap_init(void);
+/* Reserve the heap's memory. Returns 0 if it could not be reserved, which is
+ * fatal in practice - almost everything above this layer allocates. */
+int   kheap_init(void);
 
 /* Returns a pointer to at least `size` usable bytes, or NULL if the heap is
  * exhausted. Callers MUST check for NULL — there is no exception mechanism

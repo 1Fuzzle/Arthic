@@ -25,8 +25,9 @@
 void paging_init(void);
 
 /* Change the flags on one already-mapped page. Used to make the kernel's own
- * code read-only after the initial mapping is built. */
-void paging_set_flags(uint32_t virtual_addr, uint32_t flags);
+ * code read-only after the initial mapping is built. Returns 0 if nothing is
+ * mapped at that address, so the flags were not applied to anything. */
+int paging_set_flags(uint32_t virtual_addr, uint32_t flags);
 
 /* How much memory is identity-mapped. */
 uint32_t paging_mapped_limit(void);
@@ -39,8 +40,10 @@ void paging_set_fault_resume(uint32_t eip);
  * The machine survives either way. */
 int paging_probe_write(volatile uint32_t *addr, uint32_t value);
 
-/* Mark a range as accessible from ring 3. */
-void paging_make_user(uint32_t start, uint32_t end, int writable);
+/* Mark a range as accessible from ring 3. Returns 0 if any page in the range
+ * was not mapped and therefore was not opened up - which the caller must not
+ * ignore, since ring 3 would fault on it. */
+int paging_make_user(uint32_t start, uint32_t end, int writable);
 
 /* Map one page of virtual memory onto a physical frame, creating the page
  * table if that region has none yet. Returns 0 if it could not allocate a

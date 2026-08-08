@@ -62,16 +62,15 @@ struct task {
 	void       (*on_exit)(void *arg);
 
 	/* Output from ring 3 is held here until a newline arrives, then emitted
-	 * in one go. Individual writes were already serialised; a whole LINE was
-	 * not, so two processes could interleave halfway through a message. */
-	char         out_buf[120];
-	uint32_t     out_len;
-
-	/* Output from ring 3 is held here until a newline arrives, then emitted
 	 * in one piece. The console lock makes a single write atomic; this makes
-	 * a whole LINE atomic, which is the thing anyone actually wanted. */
-	char         outbuf[128];
-	uint32_t     outlen;
+	 * a whole LINE atomic, which is the thing anyone actually wanted.
+	 *
+	 * ONE buffer, and that matters. There used to be two - one written by the
+	 * syscall path, a differently named one read by the flush on task death -
+	 * so a program that died mid-line had that line silently discarded while
+	 * an empty buffer was dutifully flushed instead. */
+	char         out_buf[128];
+	uint32_t     out_len;
 
 	struct task *next;
 
@@ -83,8 +82,18 @@ struct task {
 };
 
 /* Turn the current thread of control into task 0. Everything running before
- * this becomes a schedulable task rather than "the kernel". */
-void task_init(void);
+ * this becomes a schedulable task rather than "the kernel".
+ *
+ * Returns 0 if the initial task could not be allocated. That is not something
+ * to shrug at: without it there is no scheduler at all and every later
+ * task_create fails, so the caller must treat it as fatal rather than carrying
+ * on with a kernel that quietly cannot run threads. */
+int task_init(void);
+
+/* Append a NUL-terminated string to this task's line buffer, emitting whole
+ * lines as they complete. A task of 0 goes straight to the terminal, there
+ * being nothing to buffer into. */
+void task_buffer_output(struct task *t, const char *text);
 
 /* Create a task that begins at `entry`. Returns its id, or 0 on failure. */
 uint32_t task_create(const char *name, void (*entry)(void));

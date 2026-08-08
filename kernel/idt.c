@@ -146,28 +146,46 @@ void irq_unmask(uint8_t irq)
 	outb(port, (uint8_t)(inb(port) & ~(1 << irq)));
 }
 
-void isr_install_handler_vector(uint32_t vector, irq_handler_t handler)
+/* These three used to return void and drop bad or unstorable registrations on
+ * the floor. That is the worst possible failure for this particular job:
+ * registering a handler is something a subsystem does once, during
+ * initialisation, and if it did not take, the discovery comes later as an
+ * interrupt that goes nowhere - a keyboard that does not type, or a syscall gate
+ * that faults. None of that points back to the line that failed.
+ *
+ * They return 1 on success and 0 if the handler was NOT installed. */
+int isr_install_handler_vector(uint32_t vector, irq_handler_t handler)
 {
 	for (int i = 0; i < EXTRA_VECTORS; i++) {
 		if (extra_handlers[i].vector == 0 || extra_handlers[i].vector == vector) {
 			extra_handlers[i].vector  = vector;
 			extra_handlers[i].handler = handler;
-			return;
+			return 1;
 		}
 	}
+
+	/* The table is full. Enlarging EXTRA_VECTORS is the fix if this ever
+	 * happens; silence was not. */
+	return 0;
 }
 
-void isr_install_handler(int exception, irq_handler_t handler)
+int isr_install_handler(int exception, irq_handler_t handler)
 {
-	if (exception < 0 || exception > 31) return;
+	if (exception < 0 || exception > 31)
+		return 0;
+
 	isr_handlers[exception] = handler;
+	return 1;
 }
 
-void irq_install_handler(int irq, irq_handler_t handler)
+int irq_install_handler(int irq, irq_handler_t handler)
 {
-	if (irq < 0 || irq > 15) return;
+	if (irq < 0 || irq > 15)
+		return 0;
+
 	irq_handlers[irq] = handler;
 	irq_unmask((uint8_t)irq);
+	return 1;
 }
 
 /* ---- Handlers -------------------------------------------------------------
@@ -206,10 +224,8 @@ void isr_handler(struct registers *regs)
 	        regs->eip, regs->cs, regs->eflags, regs->err_code);
 	kprintf("    eax=0x%x  ebx=0x%x  ecx=0x%x  edx=0x%x\n",
 	        regs->eax, regs->ebx, regs->ecx, regs->edx);
-	kprintf("    system halted.\n");
 
-	for (;;)
-		__asm__ volatile ("cli; hlt");
+	kpanic(name);
 }
 
 /* A hardware interrupt. Normal traffic, not an error. */

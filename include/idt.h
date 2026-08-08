@@ -35,11 +35,15 @@ void idt_install(void);
 /* Install a handler for one CPU exception (0-31). Without this, every
  * exception goes to the default handler, which prints and halts. Page faults
  * need something better than that. */
-void isr_install_handler(int exception, irq_handler_t handler);
+/* All three return 1 if the handler was installed and 0 if it was not - a
+ * vector out of range, or no room left in the table. A registration that did
+ * not happen shows up much later as an interrupt nobody handles, which is why
+ * the result is worth checking at the call site. */
+int isr_install_handler(int exception, irq_handler_t handler);
 
 /* Install a handler for any vector, including ones outside 0-47 such as the
  * syscall gate at 0x80. */
-void isr_install_handler_vector(uint32_t vector, irq_handler_t handler);
-void irq_install_handler(int irq, irq_handler_t handler);
+int isr_install_handler_vector(uint32_t vector, irq_handler_t handler);
+int irq_install_handler(int irq, irq_handler_t handler);
 
 #endif

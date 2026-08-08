@@ -61,7 +61,6 @@ static void command_help(void)
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");
 	kprintf("  append <name> <text>  add to the end of a file\n");
-	kprintf("  append <name> <text>  add to the end of a file\n");
 	kprintf("  rm <name>     delete a file\n");
 	kprintf("  bigfile       write and verify a 20 KB file (tests indirect blocks)\n");
 	kprintf("  df            filesystem usage\n");
@@ -171,6 +170,15 @@ static void command_heaptest(void)
 	kprintf("kfree(a)\n");
 
 	char *c = (char *) kmalloc(32);
+	if (!c) {
+		/* Checked like the other two. Printing an address of 0 as though it
+		 * were an allocation, then freeing it, is the kind of thing that works
+		 * by luck until it does not. */
+		kprintf("third allocation failed\n");
+		kfree(b);
+		return;
+	}
+
 	kprintf("c = kmalloc(32)   -> 0x%x  %s\n", (uint32_t) c,
 	        ((uint32_t) c == (uint32_t) a) ? "(reused a's space)" : "");
 
@@ -249,9 +257,20 @@ static void run_counter_test(int locked)
 	kprintf("two threads, %u increments each, %s\n",
 	        (uint32_t) INCREMENTS, locked ? "WITH a mutex" : "with NO lock");
 
-	if (!task_create("count", counter_thread) ||
-	    !task_create("count", counter_thread)) {
-		kprintf("could not create threads\n");
+	/* Two calls, two results, and the second one failing does not undo the
+	 * first. `!a() || !b()` reads as one test and is not: it can leave a worker
+	 * running that nothing is waiting for and nothing will ever stop, still
+	 * adding to shared_counter while the next test reads it. Whoever starts
+	 * half of something has to finish tidying it up. */
+	uint32_t first = task_create("count", counter_thread);
+	if (!first) {
+		kprintf("could not create the first thread\n");
+		return;
+	}
+
+	if (!task_create("count", counter_thread)) {
+		kprintf("could not create the second thread\n");
+		task_kill(first);
 		return;
 	}
 
@@ -317,7 +336,7 @@ static void command_format(void)
 	if (fs_format())
 		kprintf("done. ArthicFS ready.\n");
 	else
-		kprintf("format failed\n");
+		kprintf("format failed: %s\n", fs_error_string(fs_last_error()));
 }
 
 static void command_df(void)
@@ -367,10 +386,13 @@ static void command_write(const char *line)
 		return;
 	}
 
+	/* "exists, full, or no space" was the shell guessing, because a bare 0 was
+	 * all it had to go on. The filesystem knows which of those it was. */
 	if (fs_create(name, text, length))
 		kprintf("wrote %u bytes to %s\n", length, name);
 	else
-		kprintf("could not write %s (exists, full, or no space)\n", name);
+		kprintf("could not write %s: %s\n", name,
+		        fs_error_string(fs_last_error()));
 }
 
 static void command_cat(const char *line)
@@ -386,12 +408,20 @@ static void command_cat(const char *line)
 	uint32_t size = 0;
 
 	if (!fs_read(name, contents, sizeof(contents) - 1, &size)) {
-		kprintf("no such file: %s\n", name);
+		kprintf("cannot read %s: %s\n", name,
+		        fs_error_string(fs_last_error()));
 		return;
 	}
 
+	/* The read worked but the file did not fit. Printing the fragment and
+	 * saying nothing would offer part of a file as the whole of it. */
+	int truncated = (fs_last_error() == FS_ERR_TRUNCATED);
+
 	contents[size] = '\0';
 	kprintf("%s\n", contents);
+
+	if (truncated)
+		kprintf("[truncated - the first %u bytes of a larger file]\n", size);
 }
 
 static void command_append(const char *line)
@@ -428,7 +458,8 @@ static void command_append(const char *line)
 	if (fs_append(name, text, length))
 		kprintf("appended %u bytes to %s\n", length, name);
 	else
-		kprintf("could not append to %s\n", name);
+		kprintf("could not append to %s: %s\n", name,
+		        fs_error_string(fs_last_error()));
 }
 
 /* Create a file large enough to need the indirect block, then read it back and
@@ -459,10 +490,19 @@ static void command_bigfile(void)
 	for (uint32_t i = 0; i < size; i++)
 		data[i] = (uint8_t)(i * 7 + (i >> 8));
 
-	fs_delete("bigfile");
+	/* Start from a clean slate. A missing file is the expected case and not an
+	 * error here, but any OTHER reason for the delete failing means the create
+	 * below is about to fail too, and this is where the useful message is. */
+	if (!fs_delete("bigfile") && fs_last_error() != FS_ERR_NOT_FOUND) {
+		kprintf("could not remove the old bigfile: %s\n",
+		        fs_error_string(fs_last_error()));
+		kfree(data);
+		return;
+	}
 
 	if (!fs_create("bigfile", data, size)) {
-		kprintf("could not create it\n");
+		kprintf("could not create it: %s\n",
+		        fs_error_string(fs_last_error()));
 		kfree(data);
 		return;
 	}
@@ -476,7 +516,8 @@ static void command_bigfile(void)
 
 	uint32_t got = 0;
 	if (!fs_read("bigfile", back, size, &got)) {
-		kprintf("could not read it back\n");
+		kprintf("could not read it back: %s\n",
+		        fs_error_string(fs_last_error()));
 		kfree(data);
 		kfree(back);
 		return;
@@ -507,7 +548,8 @@ static void command_rm(const char *line)
 	if (fs_delete(name))
 		kprintf("deleted %s\n", name);
 	else
-		kprintf("no such file: %s\n", name);
+		kprintf("could not delete %s: %s\n", name,
+		        fs_error_string(fs_last_error()));
 }
 
 static void command_install(void)
@@ -519,8 +561,10 @@ static void command_install(void)
 
 	if (loader_install("prog"))
 		kprintf("wrote the demo program to the disk as 'prog'\n");
+	else if (fs_last_error() == FS_ERR_EXISTS)
+		kprintf("'prog' is already there - 'rm prog' first\n");
 	else
-		kprintf("could not write it (already there? try 'rm prog')\n");
+		kprintf("could not write it: %s\n", fs_error_string(fs_last_error()));
 }
 
 static void command_run(const char *line)
@@ -546,7 +590,12 @@ static void command_run(const char *line)
 	while (*args == ' ')
 		args++;
 
-	loader_run(name, args);
+	/* loader_run explains its own failures in detail, so there is nothing to
+	 * add - but the result is still worth acting on rather than discarding,
+	 * because only the shell knows the user is waiting for a prompt and needs
+	 * telling that nothing was started. */
+	if (!loader_run(name, args))
+		kprintf("run: %s did not start\n", name);
 }
 
 /* ---- Pipes -----------------------------------------------------------------
@@ -617,9 +666,27 @@ static void command_pipetest(void)
 	kprintf("producer sends 40 messages through a %u byte pipe\n",
 	        (uint32_t) PIPE_CAPACITY);
 
-	if (!task_create("producer", producer_thread) ||
-	    !task_create("consumer", consumer_thread)) {
-		kprintf("could not create the threads\n");
+	/* As in run_counter_test: the producer may already be running by the time
+	 * the consumer fails to start, and clearing pipe_running while it lives
+	 * would leave a thread filling a pipe nobody drains - blocked forever, and
+	 * invisible because the flag says no test is running. */
+	uint32_t producer = task_create("producer", producer_thread);
+	if (!producer) {
+		kprintf("could not create the producer\n");
+		pipe_running = 0;
+		return;
+	}
+
+	if (!task_create("consumer", consumer_thread)) {
+		kprintf("could not create the consumer\n");
+
+		/* task_kill refuses a task that is blocked, and a producer with no
+		 * consumer fills the pipe and blocks almost immediately - so this can
+		 * legitimately fail, and saying so beats pretending it worked. */
+		if (task_kill(producer) != 1)
+			kprintf("the producer is stuck on the full pipe - "
+			        "'kill %u' once it wakes\n", producer);
+
 		pipe_running = 0;
 		return;
 	}
@@ -635,16 +702,30 @@ static void command_pipestat(void)
 	        reads, writes);
 }
 
-/* Parse a small unsigned number. No strtoul out here either. */
-static uint32_t parse_number(const char *s)
+/* Parse a small unsigned number. No strtoul out here either.
+ *
+ * Returns 1 and writes the value through `out` only if the WHOLE string was
+ * digits. That is why the value comes back through a pointer rather than as the
+ * return: `kill abc` used to be parsed as task 0 and reported as "no such
+ * task", which is a true statement about a question nobody asked. A parser that
+ * cannot fail cannot tell you the input was nonsense.
+ */
+static int parse_number(const char *s, uint32_t *out)
 {
 	uint32_t value = 0;
+	uint32_t digits = 0;
 
 	while (*s >= '0' && *s <= '9') {
 		value = value * 10 + (uint32_t)(*s - '0');
+		digits++;
 		s++;
 	}
-	return value;
+
+	if (digits == 0 || *s != '\0')
+		return 0;
+
+	*out = value;
+	return 1;
 }
 
 static void command_kill(const char *line)
@@ -656,7 +737,12 @@ static void command_kill(const char *line)
 		return;
 	}
 
-	uint32_t id = parse_number(arg);
+	uint32_t id = 0;
+	if (!parse_number(arg, &id)) {
+		kprintf("kill: '%s' is not a task id\n", arg);
+		return;
+	}
+
 	int result = task_kill(id);
 
 	if (result == 1)
@@ -746,8 +832,6 @@ static void execute(const char *line)
 		command_write(line);
 	else if (kstartswith(line, "cat "))
 		command_cat(line);
-	else if (kstartswith(line, "append "))
-		command_append(line);
 	else if (kstartswith(line, "append "))
 		command_append(line);
 	else if (kstartswith(line, "rm "))

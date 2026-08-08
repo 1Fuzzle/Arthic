@@ -18,7 +18,10 @@ void pmm_init(struct multiboot_info *mbi);
  * 0 is safe as a failure value because physical address 0 is never handed
  * out — the first megabyte is reserved. */
 uint32_t pmm_alloc_frame(void);
-void     pmm_free_frame(uint32_t addr);
+/* Hand a frame back. Returns 0 - and says so on the console - if the address is
+ * outside physical memory or the frame was already free, both of which mean a
+ * bug in the caller rather than a condition to recover from. */
+int      pmm_free_frame(uint32_t addr);
 
 /* Allocate `count` CONSECUTIVE frames and return the address of the first.
  * Needed by anything wanting a contiguous region larger than one page — the

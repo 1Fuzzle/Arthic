@@ -99,9 +99,9 @@ static int user_string_ok(uint32_t ptr, uint32_t max_length)
 	return 0;                            /* too long */
 }
 
-/* Buffer a program's output until a line is complete.
+/* A program's output is buffered until a line is complete.
  *
- * Without this, `print("line "); print("12\n");` from one process can have
+ * Without that, `print("line "); print("12\n");` from one process can have
  * another process's output land between the two calls - which is exactly what
  * you see if you look: "line 1  [writer] finished" then "1 through the pipe".
  * Each write was atomic; the sequence was not.
@@ -109,36 +109,15 @@ static int user_string_ok(uint32_t ptr, uint32_t max_length)
  * Real terminals do the same thing, and it is the other half of line
  * discipline - the shell already does the input side.
  *
- * The buffer is per-task, so two processes building lines at the same time do
- * not corrupt each other's. It flushes on a newline or when full; the second
- * condition matters because a program that never emits one must not be able to
- * make the kernel buffer without limit.
+ * The buffer itself belongs to the task, and so do the two functions that
+ * touch it, in task.c. This file used to keep a second copy of that logic
+ * writing a second, identically-purposed field, and the two drifted: the flush
+ * on task death read the field nobody wrote, so a program killed mid-line had
+ * that line thrown away rather than printed.
  */
-static void buffered_write(struct task *t, const char *text)
-{
-	if (!t) {
-		terminal_write(text);        /* no task context - just print it */
-		return;
-	}
-
-	for (uint32_t i = 0; text[i]; i++) {
-		t->outbuf[t->outlen++] = text[i];
-
-		if (text[i] == '\n' || t->outlen >= sizeof(t->outbuf) - 1) {
-			t->outbuf[t->outlen] = '\0';
-			terminal_write(t->outbuf);
-			t->outlen = 0;
-		}
-	}
-}
-
 void syscall_flush_output(struct task *t)
 {
-	if (t && t->outlen) {
-		t->outbuf[t->outlen] = '\0';
-		terminal_write(t->outbuf);
-		t->outlen = 0;
-	}
+	task_flush_output(t);
 }
 
 static void syscall_dispatch(struct registers *regs)
@@ -153,7 +132,7 @@ static void syscall_dispatch(struct registers *regs)
 			regs->eax = (uint32_t) -1;
 			return;
 		}
-		buffered_write(task_current(), (const char *) regs->ebx);
+		task_buffer_output(task_current(), (const char *) regs->ebx);
 		regs->eax = 0;
 		return;
 
@@ -234,5 +213,9 @@ static void syscall_dispatch(struct registers *regs)
 
 void syscall_install(void)
 {
-	isr_install_handler_vector(SYSCALL_VECTOR, syscall_dispatch);
+	/* Ring 3 has no other way in. If this registration were dropped, `int 0x80`
+	 * would reach the default exception handler and every program would die on
+	 * its first syscall, with nothing pointing back to here. */
+	if (!isr_install_handler_vector(SYSCALL_VECTOR, syscall_dispatch))
+		kpanic("syscall: could not install the int 0x80 handler");
 }

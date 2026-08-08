@@ -119,11 +119,16 @@ static uint32_t *entry_for(uint32_t virtual_addr)
 	return &table[tbl_index];
 }
 
-void paging_set_flags(uint32_t virtual_addr, uint32_t flags)
+int paging_set_flags(uint32_t virtual_addr, uint32_t flags)
 {
 	uint32_t *entry = entry_for(virtual_addr);
+
+	/* Nothing is mapped there, so there are no flags to change. Saying so
+	 * matters: a caller opening a range up to ring 3 needs to know it did not
+	 * happen, or it will hand a program addresses that fault on first touch
+	 * and blame the program. */
 	if (!entry)
-		return;
+		return 0;
 
 	/* Keep the physical address, replace the flags. */
 	*entry = (*entry & 0xFFFFF000) | flags;
@@ -133,6 +138,8 @@ void paging_set_flags(uint32_t virtual_addr, uint32_t flags)
 	 * like the hardware ignoring you. `invlpg` drops one page's cached
 	 * translation. */
 	__asm__ volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
+
+	return 1;
 }
 
 /* Page fault handler.
@@ -218,10 +225,8 @@ static void page_fault_handler(struct registers *regs)
 	        write    ? "write" : "read",
 	        user     ? "ring 3" : "ring 0",
 	        reserved ? ", reserved bit set" : "");
-	kprintf("    system halted.\n");
 
-	for (;;)
-		__asm__ volatile ("cli; hlt");
+	kpanic("unhandled page fault in ring 0");
 }
 
 void paging_init(void)
@@ -245,11 +250,8 @@ void paging_init(void)
 		/* A page table is exactly one frame — 1024 entries of 4 bytes is
 		 * 4096 bytes. Not a coincidence. */
 		uint32_t table_phys = pmm_alloc_frame();
-		if (!table_phys) {
-			kprintf("paging: out of memory building page tables\n");
-			for (;;)
-				__asm__ volatile ("cli; hlt");
-		}
+		if (!table_phys)
+			kpanic("paging: out of memory building page tables");
 
 		uint32_t *table = (uint32_t *) table_phys;
 
@@ -277,7 +279,11 @@ void paging_init(void)
 			*entry = (*entry & 0xFFFFF000) | PAGE_PRESENT;  /* not writable */
 	}
 
-	isr_install_handler(14, page_fault_handler);
+	/* Vector 14 is the page fault. Without this handler every fault - including
+	 * the recoverable ones paging_probe_write depends on - goes to the default
+	 * one, which halts. */
+	if (!isr_install_handler(14, page_fault_handler))
+		kpanic("paging: could not install the page fault handler");
 
 	/* Point CR3 at the directory. This register is where the MMU looks. */
 	__asm__ volatile ("mov %0, %%cr3" : : "r"(page_directory));
@@ -370,9 +376,10 @@ void paging_unmap(uint32_t virtual_addr)
 	__asm__ volatile ("invlpg (%0)" : : "r"(virtual_addr) : "memory");
 }
 
-void paging_make_user(uint32_t start, uint32_t end, int writable)
+int paging_make_user(uint32_t start, uint32_t end, int writable)
 {
 	uint32_t flags = PAGE_PRESENT | PAGE_USER | (writable ? PAGE_WRITE : 0);
+	int ok = 1;
 
 	for (uint32_t addr = start & ~(PAGE_SIZE - 1); addr < end; addr += PAGE_SIZE) {
 		/* PERMISSIONS ARE THE AND OF BOTH LEVELS.
@@ -392,8 +399,14 @@ void paging_make_user(uint32_t start, uint32_t end, int writable)
 		 * directory entry grants permission to ask, not permission to read. */
 		page_directory[addr >> 22] |= PAGE_USER;
 
-		paging_set_flags(addr, flags);
+		/* Carry on through the whole range even after a failure, so the
+		 * mapping is left in one describable state rather than half done at
+		 * whichever page happened to be missing first. */
+		if (!paging_set_flags(addr, flags))
+			ok = 0;
 	}
+
+	return ok;
 }
 
 /* ---- address spaces -------------------------------------------------------- */
