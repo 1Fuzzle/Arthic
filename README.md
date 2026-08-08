@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v2.3
+## Current state - v2.4
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -13,8 +13,10 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - PIT timer driving a tick counter
 - PS/2 keyboard driver with Shift and Caps Lock
 - Physical memory manager: bitmap frame allocator driven by the BIOS memory map
-- Paging: all RAM identity-mapped, kernel code and rodata read-only, CR0.WP
-  set, all kernel pages supervisor-only, page fault handler reporting CR2
+- Paging with PAE: three-level tables, 64-bit entries, all RAM identity-mapped,
+  kernel code and rodata read-only, CR0.WP set, kernel pages supervisor-only,
+  page fault handler reporting CR2 and distinguishing instruction fetches
+- **NX**: data and stack pages are non-executable. W^X is now complete.
 - Kernel heap: 1 MB, first-fit with block splitting and coalescing, magic-number
   guards against double free and corruption
 - TSS and ring 3: a user program runs at reduced privilege and reaches the

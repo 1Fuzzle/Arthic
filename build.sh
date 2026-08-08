@@ -111,6 +111,10 @@ if [ "$1" = "run" ]; then
 	fi
 
 	echo "starting qemu ... (close the window or press Ctrl-C to stop)"
-	qemu-system-i386 -no-reboot -m 128M -kernel arthic.bin \
+	# -cpu matters: QEMU's default 32-bit CPU model does not advertise NX, so
+	# the kernel would correctly detect it as unavailable and leave data pages
+	# executable. Real hardware has had NX since the mid-2000s; asking QEMU for
+	# it makes the emulator match.
+	qemu-system-i386 -no-reboot -m 128M -cpu qemu32,+pae,+nx -kernel arthic.bin \
 	    -drive file="$DISK",format=raw,if=ide
 fi

@@ -56,7 +56,7 @@ static void command_help(void)
 	kprintf("  pipestat      pipe contents and how often each side blocked\n");
 	kprintf("  install       write the demo program to the disk\n");
 	kprintf("  run <name> [arg]  load a program as its own process\n");
-	kprintf("                    try: run prog read   and   run prog write\n");
+	kprintf("                    try: run prog read | write | nx\n");
 	kprintf("  ls            list files\n");
 	kprintf("  cat <name>    print a file\n");
 	kprintf("  write <name> <text>   create a file\n");

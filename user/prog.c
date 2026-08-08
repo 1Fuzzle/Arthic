@@ -99,6 +99,31 @@ static unsigned int counter;
 /* The entry point is now DECLARED in the ELF header rather than assumed to be
  * the first byte, so its position in the file no longer matters. Kept in its
  * own section anyway, because it costs nothing and keeps the layout readable. */
+/* Try to execute data.
+ *
+ * Copies a `ret` instruction (0xC3) into a stack array and calls it. On a
+ * system without NX this returns harmlessly - the data was executable and
+ * nothing objected, which is precisely the problem. With NX the CPU refuses on
+ * the instruction fetch and the program is killed.
+ *
+ * That difference is the whole of W^X in one line. Every buffer overflow that
+ * ends in "and then jump to the shellcode the attacker wrote into the buffer"
+ * depends on data being executable.
+ */
+static void run_nx_test(void)
+{
+	volatile char code[16];
+	code[0] = (char) 0xC3;               /* ret */
+
+	print("  [nx] wrote a ret instruction onto my own stack\n");
+	print("  [nx] now calling it - NX should stop this\n");
+
+	void (*f)(void) = (void (*)(void)) code;
+	f();
+
+	print("  [nx] SURVIVED - the stack is executable, W^X is NOT enforced\n");
+}
+
 /* ---- the two pipe modes ----------------------------------------------------
  *
  * Same binary, different behaviour depending on the argument. Two separate
@@ -157,6 +182,11 @@ void _start(void)
 	/* Behave differently depending on what we were told. */
 	if (streq(ARGS, "write")) {
 		run_writer();
+		syscall(SYS_EXIT, 0);
+	}
+
+	if (streq(ARGS, "nx")) {
+		run_nx_test();
 		syscall(SYS_EXIT, 0);
 	}
 
