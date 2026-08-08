@@ -4,7 +4,10 @@
 
 #include <stdint.h>
 
-void usermode_init(void);
+/* Reserve and open up the memory ring 3 needs. Returns 0 if that could not be
+ * done, in which case ring 3 is simply unavailable - the `user` command says so
+ * rather than jumping into memory the CPU will refuse. */
+int usermode_init(void);
 void usermode_run(void);    /* enters ring 3; returns when the program exits */
 void usermode_exit(void);   /* called from the SYS_EXIT handler */
 

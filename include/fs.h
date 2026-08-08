@@ -70,6 +70,42 @@ struct fs_entry {
 	uint8_t  padding[128 - FS_NAME_MAX - 8 - FS_DIRECT_BLOCKS * 4 - 4];
 } __attribute__((packed));
 
+/* WHY THESE EXIST
+ *
+ * Every call below used to answer only "did it work?", and the shell had to
+ * invent a reason: `cat` printed "no such file" whether the file was missing,
+ * the disk had failed, or the block list pointed somewhere impossible. Those
+ * need different responses from whoever is reading the message, so the reason
+ * has to survive the return journey.
+ *
+ * The 1/0 return is kept - callers that only care whether it worked stay
+ * unchanged - and the reason is recorded alongside it, which is the same shape
+ * as C's own errno. The cost of that design is that the code is a single
+ * global: it describes the LAST call, so read it immediately, before making
+ * another. */
+enum fs_error {
+	FS_OK = 0,
+	FS_ERR_NOT_MOUNTED,   /* no filesystem in memory to work with     */
+	FS_ERR_NO_DISK,       /* the disk itself is absent or too small    */
+	FS_ERR_IO,            /* the disk refused a read or a write        */
+	FS_ERR_BAD_MAGIC,     /* readable, but not an ArthicFS v2 disk     */
+	FS_ERR_NOT_FOUND,
+	FS_ERR_EXISTS,
+	FS_ERR_NAME,          /* empty, or longer than FS_NAME_MAX - 1     */
+	FS_ERR_DIR_FULL,      /* all FS_MAX_FILES entries are taken        */
+	FS_ERR_DISK_FULL,     /* no free block left                        */
+	FS_ERR_TOO_BIG,       /* would exceed FS_MAX_BLOCKS for one file   */
+	FS_ERR_CORRUPT,       /* the file's block list does not make sense */
+	FS_ERR_TRUNCATED      /* the read worked but did not all fit       */
+};
+
+/* Why the last call failed, or FS_OK. Also set to FS_ERR_TRUNCATED by a read
+ * that succeeded but could not return the whole file. */
+enum fs_error fs_last_error(void);
+
+/* A short description, suitable for printing straight to the user. */
+const char *fs_error_string(enum fs_error error);
+
 int  fs_mount(void);        /* 1 if a valid filesystem was found */
 int  fs_format(void);
 int  fs_is_mounted(void);
@@ -77,6 +113,11 @@ int  fs_is_mounted(void);
 void fs_list(void);
 int  fs_create(const char *name, const void *data, uint32_t size);
 int  fs_append(const char *name, const void *data, uint32_t size);
+
+/* Copy up to `max` bytes of `name` into `buffer`. A file larger than `max` is
+ * truncated: the call still returns 1, but fs_last_error becomes
+ * FS_ERR_TRUNCATED so the caller can say so rather than quietly presenting a
+ * fragment as the whole file. */
 int  fs_read(const char *name, void *buffer, uint32_t max, uint32_t *size_out);
 int  fs_delete(const char *name);
 void fs_stats(uint32_t *total, uint32_t *used, uint32_t *files);

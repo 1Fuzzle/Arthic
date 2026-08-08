@@ -444,3 +444,21 @@ void kprintf(const char *fmt, ...) {
 	console_unlock(flags);
 }
 
+/* One place where the kernel gives up, rather than the same four lines of
+ * cli/hlt copied into every subsystem. Having a named function for it means the
+ * message always looks the same and there is one obvious thing to grep for.
+ *
+ * The colour change is deliberate: a panic should not look like ordinary
+ * output. */
+_Noreturn void kpanic(const char *reason)
+{
+	terminal_set_colour(vga_entry_colour(VGA_LIGHT_RED, VGA_BLACK));
+	kprintf("\n*** PANIC: %s\n    system halted.\n", reason);
+
+	/* cli before hlt, and in that order. hlt alone wakes on the next
+	 * interrupt and carries on executing; clearing the interrupt flag first
+	 * means nothing can wake it, so this really is the end. */
+	for (;;)
+		__asm__ volatile ("cli; hlt");
+}
+

@@ -62,13 +62,11 @@ static void copy_name(char *dest, const char *src)
 	dest[i] = '\0';
 }
 
-void task_init(void)
+int task_init(void)
 {
 	struct task *t = (struct task *) kmalloc(sizeof(struct task));
-	if (!t) {
-		kprintf("task: cannot allocate the initial task\n");
-		return;
-	}
+	if (!t)
+		return 0;   /* the caller decides how bad this is, not us */
 
 	kmemset(t, 0, sizeof(*t));
 
@@ -93,6 +91,8 @@ void task_init(void)
 	enabled   = 1;
 
 	current_uctx = t->uctx;
+
+	return 1;
 }
 
 uint32_t task_create(const char *name, void (*entry)(void))
@@ -431,6 +431,25 @@ void task_sleep(uint32_t ticks)
 uint32_t task_switch_count(void)
 {
 	return switches;
+}
+
+void task_buffer_output(struct task *t, const char *text)
+{
+	if (!t) {
+		terminal_write(text);        /* no task context - just print it */
+		return;
+	}
+
+	for (uint32_t i = 0; text[i]; i++) {
+		t->out_buf[t->out_len++] = text[i];
+
+		/* Flush on a newline, and also when the buffer is full. The second
+		 * condition is not optional: a program that never emits a newline
+		 * must not be able to make the kernel index past the end of this
+		 * array. Leaving room for the NUL is why it is - 1. */
+		if (text[i] == '\n' || t->out_len >= sizeof(t->out_buf) - 1)
+			task_flush_output(t);
+	}
 }
 
 void task_flush_output(struct task *t)

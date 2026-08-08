@@ -22,6 +22,7 @@
 #include "keyboard.h"
 #include "idt.h"
 #include "io.h"
+#include "terminal.h"
 
 #define KEYBOARD_DATA_PORT 0x60
 
@@ -116,5 +117,9 @@ static void keyboard_irq(struct registers *regs)
 void keyboard_install(key_callback_t callback)
 {
 	on_key = callback;
-	irq_install_handler(1, keyboard_irq);   /* also unmasks IRQ 1 */
+	/* Also unmasks IRQ 1. Failing here means a machine with no keyboard input
+	 * at all - unusable, and impossible to work out from the inside, so say it
+	 * rather than leaving a dead keyboard to be guessed at. */
+	if (!irq_install_handler(1, keyboard_irq))
+		kprintf("keyboard: could not install the IRQ 1 handler - no input\n");
 }

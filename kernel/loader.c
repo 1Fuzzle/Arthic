@@ -113,9 +113,8 @@ static int load_segment(struct program *prog, const uint8_t *file,
 	 * account for the offset, or the copy lands in the wrong place. */
 	uint32_t page_start = ph->vaddr & ~(PAGE_SIZE - 1);
 	uint32_t within     = ph->vaddr - page_start;
-	uint32_t pages      = (within + ph->memsz + PAGE_SIZE - 1) / PAGE_SIZE;
 
-	if (pages == 0 || prog->segments >= MAX_SEGMENTS)
+	if (prog->segments >= MAX_SEGMENTS)
 		return 0;
 
 	/* Untrusted input. A header claiming a huge filesz, or an offset past the
@@ -127,8 +126,21 @@ static int load_segment(struct program *prog, const uint8_t *file,
 
 	/* And refuse to map anywhere outside the region set aside for programs.
 	 * Without this, a crafted ELF could ask to be mapped over kernel memory
-	 * and the loader would oblige. */
-	if (ph->vaddr < USER_LOAD_ADDR || ph->vaddr + ph->memsz > USER_STACK_TOP)
+	 * and the loader would oblige.
+	 *
+	 * Written as a subtraction, and that is the point. `vaddr + memsz >
+	 * USER_STACK_TOP` looks like the same test and is not: 32-bit arithmetic
+	 * wraps, so a segment at 0x20001000 claiming 0xFFFFF000 bytes produces a
+	 * small sum and sails through the check meant to stop exactly that. A rule
+	 * worth carrying: when validating untrusted numbers, arrange the comparison
+	 * so no addition can overflow rather than trusting the sum. */
+	if (ph->vaddr < USER_LOAD_ADDR || ph->memsz > USER_STACK_TOP - ph->vaddr)
+		return 0;
+
+	/* memsz is bounded by the check above, so this cannot wrap either. */
+	uint32_t pages = (within + ph->memsz + PAGE_SIZE - 1) / PAGE_SIZE;
+
+	if (pages == 0)
 		return 0;
 
 	uint32_t phys = pmm_alloc_frames(pages);
@@ -254,9 +266,28 @@ int loader_run(const char *name, const char *args)
 		return 0;
 	}
 
-	if (!fs_read(name, file, MAX_PROGRAM, &size) ||
-	    size < sizeof(struct elf_header)) {
-		kprintf("loader: cannot read %s\n", name);
+	if (!fs_read(name, file, MAX_PROGRAM, &size)) {
+		/* Say what the filesystem said. "cannot read prog" covered a missing
+		 * file and a failing disk alike, and only one of those is worth
+		 * trying again. */
+		kprintf("loader: cannot read %s: %s\n", name,
+		        fs_error_string(fs_last_error()));
+		kfree(file);
+		return 0;
+	}
+
+	/* A file too big for the buffer arrives truncated, and the first 64 KB of
+	 * an ELF file is not a smaller ELF file. Refusing here gives the real
+	 * reason rather than a puzzling complaint about a bad segment later. */
+	if (fs_last_error() == FS_ERR_TRUNCATED) {
+		kprintf("loader: %s is larger than the %u byte limit\n",
+		        name, (uint32_t) MAX_PROGRAM);
+		kfree(file);
+		return 0;
+	}
+
+	if (size < sizeof(struct elf_header)) {
+		kprintf("loader: %s is too short to be an ELF file\n", name);
 		kfree(file);
 		return 0;
 	}
@@ -277,7 +308,14 @@ int loader_run(const char *name, const char *args)
 		return 0;
 	}
 
-	if (elf->phoff + (uint32_t) elf->phnum * elf->phentsize > size) {
+	/* Bound the header table without ever computing a sum that could wrap.
+	 * phnum and phentsize are 16-bit, so their product fits in 32 bits - but
+	 * adding phoff to it need not, and the old check did exactly that, so a
+	 * large enough phoff produced a small total and passed. Each step here
+	 * subtracts from a bound already known to be sound. */
+	if (elf->phentsize < sizeof(struct elf_program_header) ||
+	    elf->phoff > size ||
+	    (uint32_t) elf->phnum * elf->phentsize > size - elf->phoff) {
 		kprintf("loader: program header table runs past the end of the file\n");
 		kfree(file);
 		return 0;
@@ -345,9 +383,23 @@ int loader_run(const char *name, const char *args)
 	}
 
 	/* The argument page. Read-only from ring 3 - a program has no business
-	 * rewriting what it was told. */
+	 * rewriting what it was told.
+	 *
+	 * Both steps below are required rather than best-effort. The page is part
+	 * of the contract with the program: USER_ARGS_ADDR is a fixed address it
+	 * reads unconditionally, so "no argument page" is not a degraded mode, it
+	 * is a program that faults on its first line. Skipping the allocation
+	 * silently, or mapping without checking the result, moved the failure
+	 * somewhere it could not be explained. */
 	prog->args_phys = pmm_alloc_frame();
-	if (prog->args_phys) {
+	if (!prog->args_phys) {
+		kprintf("loader: no memory for the argument page\n");
+		paging_switch(saved);
+		unload(prog);
+		return 0;
+	}
+
+	{
 		char *dest = (char *) prog->args_phys;
 		kmemset(dest, 0, PAGE_SIZE);
 
@@ -359,9 +411,14 @@ int loader_run(const char *name, const char *args)
 			}
 		}
 		dest[i] = '\0';
+	}
 
-		paging_map(USER_ARGS_ADDR, prog->args_phys,
-		           PAGE_PRESENT | PAGE_USER);
+	if (!paging_map(USER_ARGS_ADDR, prog->args_phys,
+	                PAGE_PRESENT | PAGE_USER)) {
+		kprintf("loader: could not map the argument page\n");
+		paging_switch(saved);
+		unload(prog);
+		return 0;
 	}
 
 	paging_switch(saved);

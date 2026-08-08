@@ -81,6 +81,19 @@ static int wait_not_busy(void)
 	return 0;
 }
 
+/* Did the drive report a problem?
+ *
+ * ERR and DF are latched in the status register and stay set until the next
+ * command, so they can be read AFTER a transfer as well as before one. That
+ * matters: a drive can accept a command, hand the data over, and only then
+ * decide the operation failed. Checking beforehand alone means those failures
+ * are reported as success, which is worse than not checking at all - the
+ * filesystem then writes its metadata believing the data landed. */
+static int transfer_failed(void)
+{
+	return (inb(ATA_STATUS) & (STATUS_ERR | STATUS_DF)) != 0;
+}
+
 static int wait_ready(void)
 {
 	if (!wait_not_busy())
@@ -143,9 +156,19 @@ int ata_init(void)
 	return 1;
 }
 
+/* LBA28 carries the sector number in 28 bits, so anything above that silently
+ * loses its top bits in select_sector and addresses a completely different
+ * sector - a read from the wrong place, or worse, a write over live data. And a
+ * number merely past the end of this disk is a caller bug worth catching here,
+ * where it is one line, rather than in whatever the drive decides to do. */
+static int lba_valid(uint32_t lba)
+{
+	return lba <= 0x0FFFFFFFu && lba < total_sectors;
+}
+
 int ata_read_sector(uint32_t lba, void *buffer)
 {
-	if (!present || !wait_not_busy())
+	if (!present || !lba_valid(lba) || !wait_not_busy())
 		return 0;
 
 	select_sector(lba, 1);
@@ -159,12 +182,15 @@ int ata_read_sector(uint32_t lba, void *buffer)
 	for (int i = 0; i < SECTOR_SIZE / 2; i++)
 		out[i] = inw(ATA_DATA);
 
+	if (transfer_failed())
+		return 0;
+
 	return 1;
 }
 
 int ata_write_sector(uint32_t lba, const void *buffer)
 {
-	if (!present || !wait_not_busy())
+	if (!present || !lba_valid(lba) || !wait_not_busy())
 		return 0;
 
 	select_sector(lba, 1);
@@ -178,11 +204,20 @@ int ata_write_sector(uint32_t lba, const void *buffer)
 	for (int i = 0; i < SECTOR_SIZE / 2; i++)
 		outw(ATA_DATA, in[i]);
 
+	if (transfer_failed())
+		return 0;
+
 	/* Without this the drive may hold the data in its own cache and report
 	 * success before anything reaches the platter. On a real machine that is
-	 * the difference between a file surviving a power cut and not. */
+	 * the difference between a file surviving a power cut and not.
+	 *
+	 * The flush can itself fail, so its result is checked. Issuing a flush and
+	 * discarding the answer buys the appearance of durability rather than
+	 * durability - the one thing the flush exists to provide. */
 	outb(ATA_COMMAND, CMD_FLUSH);
-	wait_not_busy();
+
+	if (!wait_not_busy() || transfer_failed())
+		return 0;
 
 	return 1;
 }

@@ -9,6 +9,7 @@
 
 #include "timer.h"
 #include "idt.h"
+#include "terminal.h"
 
 /* ---- Timer ----------------------------------------------------------------
  * IRQ 0 fires roughly 18.2 times a second by default. This handler does the
@@ -37,5 +38,8 @@ uint32_t timer_get_ticks(void) {
 
 /* Register the handler and unmask IRQ 0. */
 void timer_install(void) {
-	irq_install_handler(0, timer_handler);
+	/* The scheduler is driven by this tick, so a lost registration would mean a
+	 * kernel that runs one task forever and looks hung rather than broken. */
+	if (!irq_install_handler(0, timer_handler))
+		kpanic("timer: could not install the IRQ 0 handler");
 }

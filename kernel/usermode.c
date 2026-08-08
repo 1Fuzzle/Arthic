@@ -117,29 +117,43 @@ void user_program(void)
 
 /* ---- Setup ---------------------------------------------------------------- */
 
-void usermode_init(void)
+int usermode_init(void)
 {
 	uint32_t text_start = (uint32_t) &user_text_start;
 	uint32_t text_end   = (uint32_t) &user_text_end;
 
-	user_stack_base = pmm_alloc_frames(USER_STACK_FRAMES);
-	if (!user_stack_base) {
-		kprintf("usermode: no memory for a user stack\n");
-		return;
-	}
-	user_stack_top = user_stack_base + USER_STACK_FRAMES * PAGE_SIZE;
+	uint32_t stack_base = pmm_alloc_frames(USER_STACK_FRAMES);
+	if (!stack_base)
+		return 0;
+
+	uint32_t stack_top = stack_base + USER_STACK_FRAMES * PAGE_SIZE;
 
 	/* Code: readable and executable by ring 3, but NOT writable.
 	 * Stack: writable, and we would mark it non-executable if 32-bit paging
-	 * had a bit for that. It does not. Noted in the README. */
-	paging_make_user(text_start, text_end, 0);
-	paging_make_user(user_stack_base, user_stack_top, 1);
+	 * had a bit for that. It does not. Noted in the README.
+	 *
+	 * Both results are checked. If a page in either range turned out not to be
+	 * mapped, ring 3 would fault the instant it touched it, and the useful
+	 * message is this one - not a page fault report from three layers away. */
+	if (!paging_make_user(text_start, text_end, 0) ||
+	    !paging_make_user(stack_base, stack_top, 1)) {
+		for (uint32_t i = 0; i < USER_STACK_FRAMES; i++)
+			pmm_free_frame(stack_base + i * PAGE_SIZE);
+		return 0;
+	}
+
+	/* Published only once everything above succeeded, so a failed setup leaves
+	 * user_stack_top at 0 and usermode_run refuses rather than jumping to
+	 * ring 3 with a half-built stack. */
+	user_stack_base = stack_base;
+	user_stack_top  = stack_top;
 
 	/* The only addresses ring 3 may pass back to the kernel. */
 	syscall_set_user_range(text_start, user_stack_top);
 
-
 	tss_set_kernel_stack(0);   /* filled in properly on entry */
+
+	return 1;
 }
 
 void usermode_exit(void)

@@ -24,4 +24,16 @@ void kprintf(const char *fmt, ...);
 void terminal_clear(void);
 void terminal_backspace(void);
 
+/* Report an unrecoverable failure and stop the machine. Never returns.
+ *
+ * `_Noreturn` tells the compiler control never comes back, so a caller does
+ * not need a `return` after it and no "variable may be used uninitialised"
+ * warning appears for code past the call. It is a promise the function keeps
+ * with the `for (;;)` in its body.
+ *
+ * Halting is the right answer only when carrying on would run the kernel in a
+ * state it cannot describe - no heap, no scheduler, no memory map. Anything
+ * recoverable should return a failure to its caller instead. */
+_Noreturn void kpanic(const char *reason);
+
 #endif
