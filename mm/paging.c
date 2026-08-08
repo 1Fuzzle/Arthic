@@ -15,6 +15,13 @@
  * permissions the hardware enforces on every single access, with no cost,
  * because the check happens in the MMU rather than in software.
  *
+ * GUARD PAGES
+ *
+ * Each kernel stack has an unmapped guard page below it. A stack overflow causes
+ * the stack pointer to advance past the legitimate stack and hit the guard page,
+ * triggering a page fault. The fault handler detects this and halts the kernel
+ * with a clear error message, preventing corruption or code execution.
+ *
  * THE STRUCTURE
  *
  * Two levels. A page directory of 1024 entries, each pointing at a page table
@@ -168,6 +175,32 @@ void paging_set_fault_resume(uint32_t eip)
 	fault_resume_eip = eip;
 }
 
+/* Check if a faulting address is within a guard page of a kernel task.
+ *
+ * Each task's stack has an unmapped guard page at stack_base (the lowest
+ * address). If a fault occurs at a guard page address, it is a stack overflow.
+ *
+ * Guard page is 1 frame (4 KB), so guard page range is:
+ *   [stack_base, stack_base + PAGE_SIZE)
+ *
+ * Returns 1 if the address is a guard page, 0 otherwise.
+ */
+static int is_guard_page_fault(uint32_t faulting_address)
+{
+	/* Visit every task and check if the faulting address falls in its guard
+	 * page. Guard page is at the lowest address of the stack allocation. */
+	struct task *t = task_current();
+
+	if (t && faulting_address >= t->stack_base && faulting_address < t->stack_base + PAGE_SIZE)
+		return 1;
+
+	/* Could iterate over ALL tasks here, but current is most likely to have
+	 * overflowed its own stack. A more thorough check would be valuable but
+	 * is not strictly necessary: any guard page fault is a kernel bug either
+	 * way. */
+	return 0;
+}
+
 static void page_fault_handler(struct registers *regs)
 {
 	if (fault_resume_eip) {
@@ -183,6 +216,24 @@ static void page_fault_handler(struct registers *regs)
 	int write    =  regs->err_code & 0x2;   /* was it a write?            */
 	int user     =  regs->err_code & 0x4;   /* did ring 3 do it?          */
 	int reserved =  regs->err_code & 0x8;   /* malformed table entry      */
+
+	/* Check for guard page fault in kernel code (ring 0). Guard pages are
+	 * unmapped pages at the base of each task's stack, placed there to catch
+	 * stack overflow before it corrupts adjacent memory or the return address.
+	 * A kernel fault in a guard page means the kernel's stack has overflowed. */
+	if (!user && !present && is_guard_page_fault(faulting_address)) {
+		terminal_set_colour(vga_entry_colour(VGA_LIGHT_RED, VGA_BLACK));
+		kprintf("\n*** STACK OVERFLOW DETECTED ***\n");
+		kprintf("Guard page fault at 0x%x (stack base of task %u)\n",
+		        faulting_address, task_current() ? task_current()->id : 0);
+		kprintf("EIP: 0x%x\n", regs->eip);
+		kprintf("The kernel stack has been exhausted. This is a fatal error.\n");
+		kprintf("Check for infinite recursion or allocating huge objects on the stack.\n");
+		kprintf("System halted.\n");
+
+		for (;;)
+			__asm__ volatile ("cli; hlt");
+	}
 
 	/* A fault from ring 3 is the program's problem, not the kernel's.
 	 *
