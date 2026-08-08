@@ -13,9 +13,22 @@
  * privilege. That is the confused deputy problem, and it is how a great many
  * real privilege escalations work.
  *
- * So: check every pointer against the range ring 3 is actually allowed, and
- * bound every length. Twice as much code as the useful part, which is roughly
- * the correct ratio.
+ * So: check every pointer against what ring 3 is actually allowed to touch,
+ * and bound every length. Twice as much code as the useful part, which is
+ * roughly the correct ratio.
+ *
+ * WHO DECIDES WHAT IS ALLOWED
+ *
+ * The page tables do, and nothing else. Every check below goes through
+ * paging_user_access_ok, which walks the address space currently loaded and
+ * asks whether ring 3 could reach those bytes on its own.
+ *
+ * The alternative - remembering a start and end address when a program is set
+ * up and comparing against those - reads as simpler and is wrong twice over.
+ * It can disagree with the hardware, and one pair of variables cannot describe
+ * two tasks with different address spaces, so whichever ran last decides what
+ * the other is permitted to do. Deriving the answer from the tables makes both
+ * problems impossible rather than merely handled.
  */
 
 #include "syscall.h"
@@ -33,70 +46,52 @@
 static struct pipe ipc_pipe;
 static int ipc_ready = 0;
 
-/* The window ring 3 may legitimately reference. Set by usermode_init. */
-static uint32_t user_range_start = 0;
-static uint32_t user_range_end   = 0;
-
-void syscall_set_user_range(uint32_t start, uint32_t end)
-{
-	user_range_start = start;
-	user_range_end   = end;
-}
-
-/* Is a NUL-terminated string from ring 3 safe to read?
+/* Is a buffer of `length` bytes at `ptr` one ring 3 may hand over?
  *
- * Two separate checks, both necessary. The pointer must start inside the user
- * range, and the string must terminate before the end of it — otherwise a
- * string with no NUL would walk straight out of user memory and into whatever
- * follows, and the kernel would happily print it.
+ * The length cap comes first and is not just tidiness: it bounds how much work
+ * one syscall can ask the kernel to do, whatever the pointer turns out to be.
  *
- * The length cap is a third line of defence: even a valid pointer should not be
- * able to make the kernel loop for an unbounded time.
+ * `written` says which direction the bytes travel. A buffer the kernel fills
+ * in has to be writable by ring 3 as well as readable, because a program that
+ * could name a read-only page here would be using the kernel to write to pages
+ * the MMU refuses it directly.
  */
-/* Is a buffer of `length` bytes at `ptr` entirely inside the user region?
- *
- * Three checks, and all three are load-bearing. The start must be in range.
- * The length must be sane on its own - an enormous one would make the addition
- * below wrap around and produce an end address that looks fine. And the end
- * must be in range too.
- *
- * That middle check is the one people forget, and integer overflow in a bounds
- * check is how a great many exploits begin: ptr + length wraps past zero, the
- * comparison passes, and the kernel then copies gigabytes.
- */
-static int user_buffer_ok(uint32_t ptr, uint32_t length)
+static int user_buffer_ok(uint32_t ptr, uint32_t length, int written)
 {
 	if (length == 0 || length > 4096)
 		return 0;
 
-	if (ptr < user_range_start || ptr >= user_range_end)
-		return 0;
-
-	if (ptr + length < ptr)          /* overflow */
-		return 0;
-
-	if (ptr + length > user_range_end)
-		return 0;
-
-	return 1;
+	return paging_user_access_ok(ptr, length, written);
 }
 
+/* Is a NUL-terminated string from ring 3 safe to read?
+ *
+ * Harder than a buffer, because the length is not given - it is wherever the
+ * NUL happens to be, and a string with no NUL at all must not be allowed to
+ * walk the kernel out of user memory and into whatever follows.
+ *
+ * So each byte is checked before it is read, rather than checking a span up
+ * front: the string may legitimately end one byte before a page that ring 3
+ * cannot touch, and demanding the whole `max_length` be accessible would
+ * reject it. The cap remains as the outer bound on how long the kernel will
+ * look.
+ */
 static int user_string_ok(uint32_t ptr, uint32_t max_length)
 {
-	if (ptr < user_range_start || ptr >= user_range_end)
-		return 0;
-
 	for (uint32_t i = 0; i < max_length; i++) {
 		uint32_t addr = ptr + i;
 
-		if (addr >= user_range_end)
-			return 0;                    /* ran off the end without a NUL */
+		if (addr < ptr)                      /* wrapped past the top of memory */
+			return 0;
+
+		if (!paging_user_access_ok(addr, 1, 0))
+			return 0;
 
 		if (*(const char *) addr == '\0')
-			return 1;                    /* properly terminated in range  */
+			return 1;                        /* properly terminated */
 	}
 
-	return 0;                            /* too long */
+	return 0;                                /* too long */
 }
 
 /* Buffer a program's output until a line is complete.
@@ -183,7 +178,8 @@ static void syscall_dispatch(struct registers *regs)
 			ipc_ready = 1;
 		}
 
-		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
+		/* The kernel only reads this one. */
+		if (!user_buffer_ok(regs->ebx, regs->ecx, 0)) {
 			kprintf("[syscall] rejected bad write buffer 0x%x len %u\n",
 			        regs->ebx, regs->ecx);
 			regs->eax = (uint32_t) -1;
@@ -199,7 +195,9 @@ static void syscall_dispatch(struct registers *regs)
 			ipc_ready = 1;
 		}
 
-		if (!user_buffer_ok(regs->ebx, regs->ecx)) {
+		/* And this one the kernel writes into, so it must be writable from
+		 * ring 3 too - see user_buffer_ok. */
+		if (!user_buffer_ok(regs->ebx, regs->ecx, 1)) {
 			kprintf("[syscall] rejected bad read buffer 0x%x len %u\n",
 			        regs->ebx, regs->ecx);
 			regs->eax = (uint32_t) -1;

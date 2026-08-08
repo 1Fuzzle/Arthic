@@ -54,13 +54,36 @@ static int write_directory(void)
 	return 1;
 }
 
+/* Is this a block number this filesystem could actually have?
+ *
+ * Every block number reached from here came off the disk, and a disk is not a
+ * trusted source - it can be corrupt, or written deliberately by something
+ * else. An out-of-range number does two distinct kinds of damage: it indexes
+ * `bitmap` past its 512 bytes, which is a plain out-of-bounds access to kernel
+ * memory, and it is added to data_start to form an LBA, which turns into a read
+ * or write of a sector belonging to something other than the file data area.
+ * Checking once, here, is what keeps both from being possible. */
+static int block_valid(uint32_t block)
+{
+	/* The bitmap is a single sector, so it can only describe this many blocks
+	 * no matter what the superblock claims. total_blocks is validated at mount
+	 * to stay within that, and this is the second half of the same guarantee. */
+	return block < super.total_blocks && block < SECTOR_SIZE * 8;
+}
+
 static int block_used(uint32_t block)
 {
+	if (!block_valid(block))
+		return 1;                       /* treat as taken - never hand it out */
+
 	return (bitmap[block / 8] >> (block % 8)) & 1;
 }
 
 static void block_mark(uint32_t block, int used)
 {
+	if (!block_valid(block))
+		return;
+
 	if (used)
 		bitmap[block / 8] |= (uint8_t)(1 << (block % 8));
 	else
@@ -97,20 +120,26 @@ static uint32_t block_alloc(void)
  */
 static uint32_t block_at(const struct fs_entry *entry, uint32_t index)
 {
-	if (index < FS_DIRECT_BLOCKS)
-		return entry->direct[index];
-
-	if (!entry->indirect)
-		return 0xFFFFFFFFu;
-
-	if (!ata_read_sector(super.data_start + entry->indirect, indirect_buffer))
-		return 0xFFFFFFFFu;
+	if (index < FS_DIRECT_BLOCKS) {
+		uint32_t block = entry->direct[index];
+		return block_valid(block) ? block : 0xFFFFFFFFu;
+	}
 
 	uint32_t slot = index - FS_DIRECT_BLOCKS;
 	if (slot >= FS_PER_INDIRECT)
 		return 0xFFFFFFFFu;
 
-	return ((uint32_t *) indirect_buffer)[slot];
+	/* Checked before it becomes an LBA, not after. */
+	if (!entry->indirect || !block_valid(entry->indirect))
+		return 0xFFFFFFFFu;
+
+	if (!ata_read_sector(super.data_start + entry->indirect, indirect_buffer))
+		return 0xFFFFFFFFu;
+
+	/* And the numbers inside the indirect block are disk contents too. */
+	uint32_t block = ((uint32_t *) indirect_buffer)[slot];
+
+	return block_valid(block) ? block : 0xFFFFFFFFu;
 }
 
 /* Attach a newly allocated block as block `index` of the file. */
@@ -124,6 +153,9 @@ static int block_set(struct fs_entry *entry, uint32_t index, uint32_t block)
 	uint32_t slot = index - FS_DIRECT_BLOCKS;
 	if (slot >= FS_PER_INDIRECT)
 		return 0;                        /* file has hit its ceiling */
+
+	if (entry->indirect && !block_valid(entry->indirect))
+		return 0;
 
 	if (!entry->indirect) {
 		/* The indirect block is itself a block, taken from the same pool.
@@ -150,6 +182,88 @@ static int block_set(struct fs_entry *entry, uint32_t index, uint32_t block)
 
 /* ---- mount and format ----------------------------------------------------- */
 
+/* The magic number says the disk was written by this format. It says nothing
+ * about whether the numbers in it make sense - a matching magic is trivial to
+ * put in front of arbitrary fields, and every field here is later used as an
+ * array index or a sector number. So check the shape as well as the label.
+ */
+static int superblock_ok(void)
+{
+	if (super.magic != FS_MAGIC)
+		return 0;                       /* not ours, or an older format */
+
+	/* The layout is fixed by the constants in fs.h, and the code addresses the
+	 * directory and bitmap through those rather than through the superblock.
+	 * A disk disagreeing about where data begins is a disk this code cannot
+	 * read correctly, so refuse it rather than work from two answers. */
+	if (super.data_start != FS_DATA_START || super.max_files != FS_MAX_FILES)
+		return 0;
+
+	/* total_blocks bounds every bitmap scan and every allocation. One sector of
+	 * bitmap covers 512 * 8 bits and no more. */
+	if (super.total_blocks == 0 || super.total_blocks > SECTOR_SIZE * 8)
+		return 0;
+
+	/* And the blocks have to exist on the actual disk, or a read near the end
+	 * of the filesystem addresses a sector past it. */
+	uint32_t sectors = ata_sector_count();
+	if (sectors <= FS_DATA_START ||
+	    super.total_blocks > sectors - FS_DATA_START)
+		return 0;
+
+	return 1;
+}
+
+/* Directory entries are disk contents as well. An entry whose name has no
+ * terminator makes every kstrcmp and kprintf on it read past its 32 bytes; an
+ * entry whose size exceeds what 8 direct + 128 indirect blocks can hold makes
+ * the read loop walk indexes the file cannot have.
+ *
+ * A bad entry is dropped from the in-memory directory rather than rejecting the
+ * whole disk: one damaged entry should not cost access to the other 63. Nothing
+ * is written back, so the disk itself is left as it was.
+ */
+static void validate_directory(void)
+{
+	for (uint32_t i = 0; i < FS_MAX_FILES; i++) {
+		struct fs_entry *entry = &directory[i];
+
+		if (!entry->used)
+			continue;
+
+		int bad = 0;
+
+		/* Must be NUL-terminated within the field, and not empty. */
+		uint32_t n = 0;
+		while (n < FS_NAME_MAX && entry->name[n])
+			n++;
+
+		if (n == 0 || n >= FS_NAME_MAX)
+			bad = 1;
+
+		if (entry->size > FS_MAX_BLOCKS * FS_BLOCK_SIZE)
+			bad = 1;
+
+		/* Only the blocks the size says are in use need to be valid; the rest
+		 * of the direct array is unused space and may hold anything. */
+		uint32_t blocks = (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+		if (blocks > FS_DIRECT_BLOCKS)
+			blocks = FS_DIRECT_BLOCKS;
+
+		for (uint32_t b = 0; b < blocks; b++)
+			if (!block_valid(entry->direct[b]))
+				bad = 1;
+
+		if (entry->indirect && !block_valid(entry->indirect))
+			bad = 1;
+
+		if (bad) {
+			kprintf("fs: ignoring corrupt directory entry %u\n", i);
+			kmemset(entry, 0, sizeof(*entry));
+		}
+	}
+}
+
 int fs_mount(void)
 {
 	mounted = 0;
@@ -157,14 +271,21 @@ int fs_mount(void)
 	if (!ata_read_sector(0, &super))
 		return 0;
 
-	if (super.magic != FS_MAGIC)
-		return 0;                       /* not ours, or an older format */
+	if (!superblock_ok()) {
+		kmemset(&super, 0, sizeof(super));
+		return 0;
+	}
 
 	if (!read_directory())
 		return 0;
 
 	if (!ata_read_sector(FS_BITMAP_SECTOR, bitmap))
 		return 0;
+
+	/* The bitmap has to be in place before the entries are checked - deciding
+	 * whether a block number is in range needs the validated superblock, and
+	 * dropping an entry does not touch the bitmap. */
+	validate_directory();
 
 	mounted = 1;
 	return 1;
@@ -343,6 +464,15 @@ int fs_append(const char *name, const void *data, uint32_t size)
 	if (!entry)
 		return 0;
 
+	/* Refuse an append whose total would overflow the size field. Without
+	 * this the addition below wraps, the file records a size smaller than it
+	 * had, and the blocks past the new end are silently orphaned. */
+	if (size > 0xFFFFFFFFu - entry->size)
+		return 0;
+
+	if (entry->size + size > FS_MAX_BLOCKS * FS_BLOCK_SIZE)
+		return 0;                       /* would not fit in the block map */
+
 	/* The whole point of block mapping: this simply was not possible before,
 	 * because a contiguous file had nowhere to grow into. */
 	if (!write_at(entry, entry->size, (const uint8_t *) data, size))
@@ -406,6 +536,8 @@ int fs_delete(const char *name)
 		return 0;
 
 	uint32_t blocks = (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+	if (blocks > FS_MAX_BLOCKS)
+		blocks = FS_MAX_BLOCKS;
 
 	for (uint32_t i = 0; i < blocks; i++) {
 		uint32_t block = block_at(entry, i);

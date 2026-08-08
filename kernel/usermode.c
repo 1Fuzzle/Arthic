@@ -135,9 +135,12 @@ void usermode_init(void)
 	paging_make_user(text_start, text_end, 0);
 	paging_make_user(user_stack_base, user_stack_top, 1);
 
-	/* The only addresses ring 3 may pass back to the kernel. */
-	syscall_set_user_range(text_start, user_stack_top);
-
+	/* Those two calls are also what tells the syscall layer which addresses
+	 * this program may hand back: it validates pointers by asking the page
+	 * tables, so marking a page user-accessible is the single act that both
+	 * lets ring 3 touch it and lets it be named in a syscall. Two records of
+	 * the same fact would eventually disagree, and the one the hardware does
+	 * not consult would be the one that was wrong. */
 
 	tss_set_kernel_stack(0);   /* filled in properly on entry */
 }

@@ -43,7 +43,6 @@
 #include "kheap.h"
 #include "string.h"
 #include "terminal.h"
-#include "syscall.h"
 #include "tss.h"
 #include "task.h"
 
@@ -109,26 +108,43 @@ static struct program programs[MAX_PROGRAMS];
 static int load_segment(struct program *prog, const uint8_t *file,
                         uint32_t file_size, const struct elf_program_header *ph)
 {
-	/* The segment may start partway into a page. Round the address down and
-	 * account for the offset, or the copy lands in the wrong place. */
-	uint32_t page_start = ph->vaddr & ~(PAGE_SIZE - 1);
-	uint32_t within     = ph->vaddr - page_start;
-	uint32_t pages      = (within + ph->memsz + PAGE_SIZE - 1) / PAGE_SIZE;
-
-	if (pages == 0 || prog->segments >= MAX_SEGMENTS)
+	if (prog->segments >= MAX_SEGMENTS)
 		return 0;
 
 	/* Untrusted input. A header claiming a huge filesz, or an offset past the
 	 * end, would otherwise have us read whatever follows the buffer. */
-	if (ph->filesz > ph->memsz)
+	if (ph->memsz == 0 || ph->filesz > ph->memsz)
 		return 0;
 	if (ph->offset > file_size || ph->filesz > file_size - ph->offset)
 		return 0;
 
-	/* And refuse to map anywhere outside the region set aside for programs.
+	/* Refuse to map anywhere outside the region set aside for programs.
 	 * Without this, a crafted ELF could ask to be mapped over kernel memory
-	 * and the loader would oblige. */
-	if (ph->vaddr < USER_LOAD_ADDR || ph->vaddr + ph->memsz > USER_STACK_TOP)
+	 * and the loader would oblige.
+	 *
+	 * Written as a subtraction rather than `vaddr + memsz > USER_STACK_TOP`
+	 * on purpose. That addition can wrap round past zero for a large enough
+	 * memsz, giving a small sum that passes the comparison - and then the
+	 * segment is mapped exactly where this check exists to forbid. Comparing
+	 * memsz against the space remaining above vaddr cannot overflow, because
+	 * both sides are already known to be in range. */
+	if (ph->vaddr < USER_LOAD_ADDR || ph->vaddr >= USER_STACK_TOP)
+		return 0;
+	if (ph->memsz > USER_STACK_TOP - ph->vaddr)
+		return 0;
+
+	/* The segment may start partway into a page. Round the address down and
+	 * account for the offset, or the copy lands in the wrong place.
+	 *
+	 * Safe to compute only now that memsz is bounded: the rounding up adds to
+	 * it, and on an unchecked value that addition would overflow and produce a
+	 * page count far smaller than the segment - a buffer overflow with the
+	 * arithmetic doing the work. */
+	uint32_t page_start = ph->vaddr & ~(PAGE_SIZE - 1);
+	uint32_t within     = ph->vaddr - page_start;
+	uint32_t pages      = (within + ph->memsz + PAGE_SIZE - 1) / PAGE_SIZE;
+
+	if (pages == 0)
 		return 0;
 
 	uint32_t phys = pmm_alloc_frames(pages);
@@ -163,6 +179,20 @@ static int load_segment(struct program *prog, const uint8_t *file,
 	        (ph->flags & PF_W) ? "w" : "-");
 
 	return 1;
+}
+
+/* Did any segment we mapped cover this address? */
+static int entry_is_mapped(const struct program *prog, uint32_t addr)
+{
+	for (uint32_t i = 0; i < prog->segments; i++) {
+		uint32_t start = prog->segment[i].vaddr;
+		uint32_t bytes = prog->segment[i].pages * PAGE_SIZE;
+
+		if (addr >= start && addr - start < bytes)
+			return 1;
+	}
+
+	return 0;
 }
 
 static void unload(struct program *prog)
@@ -218,9 +248,9 @@ static void program_task(void)
 		return;
 	}
 
-	/* The scheduler keeps the TSS pointed at this task's kernel stack, so
-	 * there is nothing to set here. */
-	syscall_set_user_range(USER_LOAD_ADDR, USER_STACK_TOP);
+	/* The scheduler keeps the TSS pointed at this task's kernel stack, and the
+	 * syscall layer works out what this program may reference from its page
+	 * tables, so there is nothing to set up here. */
 
 	/* Does not return. The program leaves ring 3 by exiting or by faulting,
 	 * and either way the kernel kills the task rather than unwinding back
@@ -277,7 +307,30 @@ int loader_run(const char *name, const char *args)
 		return 0;
 	}
 
-	if (elf->phoff + (uint32_t) elf->phnum * elf->phentsize > size) {
+	/* The program header table must be the shape the format says it is, and it
+	 * must lie entirely within the bytes actually read.
+	 *
+	 * phentsize is checked exactly rather than as a minimum because the code
+	 * below indexes the table by it while reading a full struct out of each
+	 * slot: a file claiming a smaller stride would have the last read run past
+	 * the end of the table, and a file claiming zero would have every header
+	 * read from the same place while the bounds check below saw no size at all.
+	 *
+	 * The bound is written as three separate comparisons for one reason: the
+	 * obvious `phoff + phnum * phentsize > size` can overflow. phnum and
+	 * phentsize are 16-bit, so their product needs 32 bits and adding phoff
+	 * can wrap - producing a small total that passes, from a table that is
+	 * nowhere near the file. Each step below is checked against what remains
+	 * instead, which cannot wrap. */
+	if (elf->phentsize != sizeof(struct elf_program_header) || elf->phnum == 0) {
+		kprintf("loader: malformed program header table\n");
+		kfree(file);
+		return 0;
+	}
+
+	uint32_t table_bytes = (uint32_t) elf->phnum * elf->phentsize;
+
+	if (elf->phoff > size || table_bytes > size - elf->phoff) {
 		kprintf("loader: program header table runs past the end of the file\n");
 		kfree(file);
 		return 0;
@@ -365,6 +418,17 @@ int loader_run(const char *name, const char *args)
 	}
 
 	paging_switch(saved);
+
+	/* The entry point is another number from the file, and it decides where
+	 * the CPU starts executing. It has to land inside something this loader
+	 * actually mapped - a file naming an address in a segment it never
+	 * declared would have us jump into whatever happens to be there. */
+	if (!entry_is_mapped(prog, elf->entry)) {
+		kprintf("loader: entry point 0x%x is not inside any segment\n",
+		        elf->entry);
+		unload(prog);
+		return 0;
+	}
 
 	prog->entry  = elf->entry;
 	prog->in_use = 1;
