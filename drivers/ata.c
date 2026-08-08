@@ -156,9 +156,19 @@ int ata_init(void)
 	return 1;
 }
 
+/* LBA28 carries the sector number in 28 bits, so anything above that silently
+ * loses its top bits in select_sector and addresses a completely different
+ * sector - a read from the wrong place, or worse, a write over live data. And a
+ * number merely past the end of this disk is a caller bug worth catching here,
+ * where it is one line, rather than in whatever the drive decides to do. */
+static int lba_valid(uint32_t lba)
+{
+	return lba <= 0x0FFFFFFFu && lba < total_sectors;
+}
+
 int ata_read_sector(uint32_t lba, void *buffer)
 {
-	if (!present || !wait_not_busy())
+	if (!present || !lba_valid(lba) || !wait_not_busy())
 		return 0;
 
 	select_sector(lba, 1);
@@ -180,7 +190,7 @@ int ata_read_sector(uint32_t lba, void *buffer)
 
 int ata_write_sector(uint32_t lba, const void *buffer)
 {
-	if (!present || !wait_not_busy())
+	if (!present || !lba_valid(lba) || !wait_not_busy())
 		return 0;
 
 	select_sector(lba, 1);

@@ -583,11 +583,22 @@ int fs_delete(const char *name)
 		return fail(FS_ERR_NOT_FOUND);
 
 	uint32_t blocks = (entry->size + FS_BLOCK_SIZE - 1) / FS_BLOCK_SIZE;
+	uint32_t leaked = 0;
 
 	for (uint32_t i = 0; i < blocks; i++) {
 		uint32_t block = block_at(entry, i);
-		if (block != 0xFFFFFFFFu)
-			block_mark(block, 0);
+
+		if (block == 0xFFFFFFFFu) {
+			/* The block list could not be followed - a failing indirect read,
+			 * or a number that was never valid. The delete carries on, because
+			 * refusing would leave the user with a file they cannot remove, but
+			 * this block cannot be reclaimed and pretending otherwise would
+			 * hand it out twice later. Count it and say so. */
+			leaked++;
+			continue;
+		}
+
+		block_mark(block, 0);
 	}
 
 	if (entry->indirect)
@@ -599,9 +610,20 @@ int fs_delete(const char *name)
 	 * contents. Deleting only removes the reference, which is why deleted
 	 * files are recoverable and why securely erasing something means
 	 * overwriting it deliberately. */
-	last_error = FS_OK;   /* block_at may have set it while walking the list */
+	if (!write_metadata(1))
+		return 0;
 
-	return write_metadata(1);
+	/* Deliberately after write_metadata, which sets its own reason on failure.
+	 * The delete itself succeeded, so the return is 1 - but a leak is a fact
+	 * about the disk worth printing rather than filing away in a code the
+	 * caller has no reason to look at on success. */
+	if (leaked)
+		kprintf("fs: %s deleted, but %u block(s) could not be reclaimed\n",
+		        name, leaked);
+	else
+		last_error = FS_OK;   /* block_at set nothing worth keeping */
+
+	return 1;
 }
 
 void fs_list(void)
