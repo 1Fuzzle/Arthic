@@ -22,6 +22,7 @@
 #include "pipe.h"
 #include "fs.h"
 #include "ata.h"
+#include "loader.h"
 #include "string.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -61,6 +62,8 @@ static void command_help(void)
 	kprintf("  rm <name>     delete a file\n");
 	kprintf("  df            filesystem usage\n");
 	kprintf("  format        create a fresh filesystem (erases the disk)\n");
+	kprintf("  install       write the demo program to the disk\n");
+	kprintf("  run <name>    load an ELF64 program and run it as its own process\n");
 	kprintf("  user          drop to ring 3, use SYSCALL, come back\n");
 	kprintf("  regs          show 64-bit CPU state\n");
 	kprintf("  echo <text>   print text back\n");
@@ -71,7 +74,7 @@ static void command_about(void)
 {
 	kprintf("Arthic 64, stage 4 of the long mode port.\n");
 	kprintf("Boots into 64-bit, handles interrupts, reads the keyboard.\n");
-	kprintf("Scheduler, locks, pipes, a disk, and a filesystem.\n");
+	kprintf("It loads ELF64 programs, each in its own address space.\n");
 	kprintf("No filesystem, no per-process address spaces yet.\n");
 }
 
@@ -317,6 +320,39 @@ static const char *argument_after(const char *line, const char *command)
 	while (*p == ' ') p++;
 
 	return *p ? p : 0;
+}
+
+static void command_install(void)
+{
+	/* Copies user_prog.elf, produced by build.sh, onto the filesystem. In a
+	 * real system this would be `cp` from a host filesystem or a network
+	 * fetch; here it is embedded as a C array for the same reason the 32-bit
+	 * branch's stage 1.8 demo was - simplicity, before anything more
+	 * elaborate is worth building. */
+	extern const unsigned char prog_elf_blob[];
+	extern const unsigned int  prog_elf_blob_length;
+
+	if (!fs_is_mounted()) {
+		kprintf("no filesystem - run 'format' first\n");
+		return;
+	}
+
+	if (fs_create("prog64", prog_elf_blob, prog_elf_blob_length))
+		kprintf("wrote the demo program to disk as 'prog64'\n");
+	else
+		kprintf("could not write it (already there? try 'rm prog64')\n");
+}
+
+static void command_run(const char *line)
+{
+	const char *name = argument_after(line, "run ");
+
+	if (!name) {
+		kprintf("usage: run <name>\n");
+		return;
+	}
+
+	loader_run(name);
 }
 
 static void command_format(void)
@@ -606,6 +642,10 @@ static void execute(const char *line)
 		command_df();
 	else if (kstrcmp(line, "format") == 0)
 		command_format();
+	else if (kstrcmp(line, "install") == 0)
+		command_install();
+	else if (kstartswith(line, "run "))
+		command_run(line);
 	else if (kstartswith(line, "write "))
 		command_write(line);
 	else if (kstartswith(line, "append "))

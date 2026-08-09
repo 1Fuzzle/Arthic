@@ -28,6 +28,7 @@
 #include "idt.h"
 #include "string.h"
 #include "terminal.h"
+#include "task.h"
 
 #define ENTRIES 512
 
@@ -37,7 +38,22 @@ extern uint64_t kernel_rodata_end;
 extern volatile uint64_t fault_resume_rip;   /* interrupts.s */
 extern int probe_write(volatile uint64_t *addr, uint64_t value);
 
+/* The active PML4 - whichever address space is currently loaded in CR3.
+ * mapping/unmapping/set_flags all go through this, which is what lets the
+ * loader build a process's page tables by switching to its PML4 first, then
+ * calling the same paging_map used everywhere else. */
 static uint64_t *pml4 = 0;
+
+/* The kernel's own PML4, set once in paging_init and never freed. Every other
+ * address space is a copy of THIS one's top-level entries, so the kernel is
+ * mapped identically everywhere and a CR3 switch never pulls the rug out from
+ * under whatever code is currently executing. */
+static uint64_t *kernel_pml4 = 0;
+
+/* How many of the 512 top-level entries the kernel occupies - everything
+ * below this index is shared by every address space; everything above
+ * belongs to whichever process is loaded. */
+static uint64_t kernel_pml4_entries = 0;
 static uint64_t  mapped_limit = 0;
 
 /* Split a virtual address into its four indices.
@@ -169,7 +185,19 @@ static void page_fault_handler(struct registers *regs)
 		                  : "touched unmapped memory",
 		        faulting_address, regs->rip);
 
+		extern struct task *task_current(void);
+		extern void task_terminate(void);
 		extern void usermode_return(void);
+
+		struct task *t = task_current();
+
+		/* A loaded program is a task of its own and dies as one - see
+		 * loader.c and the note in kernel/syscall.c's SYS_EXIT case. The
+		 * built-in ring 3 demo in usermode.c runs on the SHELL's task, which
+		 * must survive, so that one unwinds via usermode_return instead. */
+		if (t && t->on_exit)
+			task_terminate();
+
 		usermode_return();
 	}
 
@@ -200,6 +228,7 @@ void paging_init(void)
 
 	kmemset((void *) root, 0, PAGE_SIZE);
 	pml4 = (uint64_t *) root;
+	kernel_pml4 = pml4;
 
 	uint64_t top = pmm_memory_top();
 
@@ -219,6 +248,7 @@ void paging_init(void)
 	}
 
 	mapped_limit = top;
+	kernel_pml4_entries = 1;   /* only entry 0 is ever populated */
 
 	/* Kernel code and constants: present, executable, not writable.
 	 * Everything else stays writable and, thanks to the NX default below,
@@ -275,4 +305,71 @@ void paging_make_user(uint64_t start, uint64_t end, int writable)
 
 		paging_set_flags(addr, flags);
 	}
+}
+
+/* ---- address spaces -------------------------------------------------------
+ * A PML4 per process, one level higher than the 32-bit branch's per-process
+ * PDPT - 512 entries instead of 4, but the same idea: copy the kernel's own
+ * top-level entries so the kernel is mapped identically everywhere, leave
+ * everything else empty for the process to fill in as it loads segments.
+ */
+
+uint64_t paging_kernel_directory(void)
+{
+	return (uint64_t) kernel_pml4;
+}
+
+uint64_t paging_create_address_space(void)
+{
+	uint64_t phys = pmm_alloc_frame();
+	if (!phys)
+		return 0;
+
+	uint64_t *dir = (uint64_t *) phys;
+	kmemset(dir, 0, PAGE_SIZE);
+
+	for (uint64_t i = 0; i < kernel_pml4_entries; i++)
+		dir[i] = kernel_pml4[i];
+
+	return phys;
+}
+
+void paging_destroy_address_space(uint64_t pml4_phys)
+{
+	if (!pml4_phys || pml4_phys == (uint64_t) kernel_pml4)
+		return;
+
+	uint64_t *dir = (uint64_t *) pml4_phys;
+
+	/* Free only what THIS address space added beyond the shared kernel
+	 * entries. The kernel's own tables belong to every address space and
+	 * freeing one here would take the whole system down with it. */
+	for (uint64_t i = kernel_pml4_entries; i < 512; i++) {
+		if (!(dir[i] & PAGE_PRESENT))
+			continue;
+
+		uint64_t *pdpt = (uint64_t *)(dir[i] & 0x000FFFFFFFFFF000ull);
+		for (uint64_t j = 0; j < 512; j++) {
+			if (!(pdpt[j] & PAGE_PRESENT))
+				continue;
+			uint64_t *pd = (uint64_t *)(pdpt[j] & 0x000FFFFFFFFFF000ull);
+			for (uint64_t k = 0; k < 512; k++) {
+				if (!(pd[k] & PAGE_PRESENT))
+					continue;
+				pmm_free_frame(pd[k] & 0x000FFFFFFFFFF000ull);  /* a PT */
+			}
+			pmm_free_frame((uint64_t) pd);
+		}
+		pmm_free_frame((uint64_t) pdpt);
+	}
+
+	pmm_free_frame(pml4_phys);
+}
+
+void paging_switch(uint64_t pml4_phys)
+{
+	uint64_t *dir = pml4_phys ? (uint64_t *) pml4_phys : kernel_pml4;
+
+	pml4 = dir;
+	__asm__ volatile ("mov %0, %%cr3" : : "r"(dir) : "memory");
 }

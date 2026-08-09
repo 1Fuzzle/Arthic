@@ -24,6 +24,7 @@
 #include "task.h"
 #include "ata.h"
 #include "fs.h"
+#include "loader.h"
 
 void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 {
@@ -37,7 +38,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic 64 - stage 6\n");
+	terminal_write("Arthic 64 - stage 7\n");
 	terminal_write("Running in 64-bit long mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));

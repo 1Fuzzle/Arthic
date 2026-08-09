@@ -72,7 +72,7 @@ static void ata_delay(void)
  * may not exist" is never the right behaviour. */
 static int wait_not_busy(void)
 {
-	for (uint32_t i = 0; i < 100000; i++) {
+	for (uint32_t i = 0; i < 2000000; i++) {
 		uint8_t status = inb(ATA_STATUS);
 
 		if (!(status & STATUS_BSY))
@@ -86,7 +86,7 @@ static int wait_ready(void)
 	if (!wait_not_busy())
 		return 0;
 
-	for (uint32_t i = 0; i < 100000; i++) {
+	for (uint32_t i = 0; i < 2000000; i++) {
 		uint8_t status = inb(ATA_STATUS);
 
 		if (status & (STATUS_ERR | STATUS_DF))

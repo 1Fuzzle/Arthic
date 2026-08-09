@@ -27,10 +27,18 @@ Keep both. Do not delete v2.4 to make room for this.
   DIRECT ports, no changes at all beyond a new build.sh entry. Files survive
   a reboot on `arthic64.img`, separate from the 32-bit branch's disk image
   since the two kernels use incompatible on-disk layouts (different FS_MAGIC).
+- **ELF64 loading with per-process address spaces**: a PML4 per process, so two
+  loaded programs both mapped at the same virtual address never collide,
+  because that address means different physical memory depending on which
+  process is running
 - A shell: `help`, `about`, `ticks`, `regs`, `mem`, `heap`, `heaptest`,
   `wxtest`, `user`, `tasks`, `spawn`, `kill`, `racetest`, `locktest`,
   `pipetest`, `pipestat`, `ls`, `cat`, `write`, `append`, `rm`, `df`,
-  `format`, `echo`, `clear`
+  `format`, `install`, `run`, `echo`, `clear`
+
+At this point the two branches are at feature parity. Everything the 32-bit
+branch does, this one now does too - the remaining differences are the ones
+64-bit was built for: NX without PAE, more address space, a wider ABI.
 
 ## What is not here yet
 

@@ -39,6 +39,7 @@
 
 #include "syscall.h"
 #include "terminal.h"
+#include "task.h"
 #include "string.h"
 
 extern void usermode_return(void);
@@ -107,20 +108,27 @@ void syscall_dispatch(struct syscall_frame *f)
 		f->rax = 0;
 		return;
 
-	case SYS_EXIT:
+	case SYS_EXIT: {
 		/* A syscall that merely returns brings the program straight back to
 		 * the instruction after `syscall` - which is exactly what happened
 		 * the first time this was written: SYS_EXIT "succeeded" and the demo
 		 * walked straight into its own infinite loop, in ring 3, forever.
 		 *
-		 * Leaving ring 3 for good is a different operation from answering a
-		 * syscall, and it uses the OTHER transition - the same IRETQ-based
-		 * one usermode_jump used to get in, run in reverse. usermode_return
-		 * does not come back here; it resumes wherever usermode_run was
-		 * called from, which is the only reason this is safe to call from
-		 * the tiny syscall scratch stack rather than the caller's own. */
+		 * Two different ways to leave ring 3 for good now exist, and which
+		 * one applies depends on WHAT is running. A loaded program (loader.c)
+		 * is its own task and dies as one, via task_terminate - the same path
+		 * a fault takes. The built-in demo in usermode.c runs on the shell's
+		 * OWN task, which must survive, so it uses the older IRETQ-reversed
+		 * unwind instead. on_exit is set only for loaded programs, which is
+		 * what makes it the right thing to branch on here. */
+		struct task *t = task_current();
+
+		if (t && t->on_exit)
+			task_terminate();
+
 		usermode_return();
 		return;   /* unreachable */
+	}
 
 	default:
 		kprintf("[syscall] unknown call %lu\n", f->rax);

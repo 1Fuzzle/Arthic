@@ -44,6 +44,7 @@
 #include "terminal.h"
 #include "timer.h"
 #include "tss.h"
+#include "paging.h"
 
 #define STACK_FRAMES 2   /* 8 KB per thread */
 
@@ -91,6 +92,12 @@ void task_init(void)
 }
 
 uint32_t task_create(const char *name, void (*entry)(void))
+{
+	return task_create_ex(name, entry, 0, 0, 0);
+}
+
+uint32_t task_create_ex(const char *name, void (*entry)(void),
+                        uint64_t page_dir, void *arg, void (*on_exit)(void *arg))
 {
 	if (!enabled)
 		return 0;
@@ -143,8 +150,11 @@ uint32_t task_create(const char *name, void (*entry)(void))
 	t->esp              = (uint64_t) sp;
 	t->kernel_stack_top  = t->esp;   /* refined properly once it first runs;
 	                                  * placeholder so it is never zero */
-	t->id    = next_id++;
-	t->state = TASK_READY;
+	t->id       = next_id++;
+	t->state    = TASK_READY;
+	t->page_dir = page_dir;
+	t->arg      = arg;
+	t->on_exit  = on_exit;
 	copy_name(t->name, name);
 
 	__asm__ volatile ("cli");
@@ -158,6 +168,11 @@ uint32_t task_create(const char *name, void (*entry)(void))
 static void reap(struct task *prev, struct task *dead)
 {
 	prev->next = dead->next;
+
+	/* Off the run queue, so it can never be scheduled again - only now is it
+	 * safe to release what it owned. */
+	if (dead->on_exit)
+		dead->on_exit(dead->arg);
 
 	for (uint64_t i = 0; i < dead->stack_frames; i++)
 		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
@@ -242,6 +257,13 @@ void task_schedule(void)
 	if (next->kernel_stack_top)
 		tss_set_kernel_stack(next->kernel_stack_top);
 
+	/* Switch the address space before the stack - safe only because every
+	 * address space contains an identical copy of the kernel's own mappings,
+	 * so the code executing right now and the stacks on both sides of the
+	 * switch live at addresses that mean the same thing in either PML4. */
+	if (next->page_dir != prev->page_dir)
+		paging_switch(next->page_dir);
+
 	task_switch(&prev->esp, next->esp);
 
 	irq_restore(flags);
@@ -287,13 +309,21 @@ void task_unblock(struct task *t)
 		t->state = TASK_READY;
 }
 
-void task_exit(void)
+void task_terminate(void)
 {
 	if (current)
 		current->state = TASK_FINISHED;
 
+	/* Switch away and never come back. Whatever was on this kernel stack -
+	 * including any interrupt frame that brought us here - is abandoned, and
+	 * freed wholesale when the task is reaped. */
 	for (;;)
 		task_schedule();
+}
+
+void task_exit(void)
+{
+	task_terminate();
 }
 
 uint32_t task_switch_count(void)
