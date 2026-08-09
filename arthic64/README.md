@@ -19,13 +19,15 @@ Keep both. Do not delete v2.4 to make room for this.
   rw- with NX. No PAE bolt-on needed - 64-bit entries have always had room.
 - A kernel heap, `kmalloc` and `kfree`, 16-byte aligned
 - Recoverable page faults
+- A preemptive round-robin scheduler: kernel threads with their own stacks,
+  switched by the timer, with sleeping, blocking, and finished threads reaped
 - A shell: `help`, `about`, `ticks`, `regs`, `mem`, `heap`, `heaptest`,
-  `wxtest`, `echo`, `clear`
+  `wxtest`, `user`, `tasks`, `spawn`, `kill`, `echo`, `clear`
 
 ## What is not here yet
 
-TSS, ring 3, syscalls, scheduler, locks, pipes, disk driver, filesystem, ELF
-loader. All of that exists on the 32-bit branch and has to be brought across.
+locks, pipes, disk driver, filesystem, ELF loader, per-process address spaces.
+All of that exists on the 32-bit branch and has to be brought across.
 
 ## Building
 

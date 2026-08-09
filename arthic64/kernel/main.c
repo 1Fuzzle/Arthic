@@ -17,6 +17,11 @@
 #include "pmm.h"
 #include "paging.h"
 #include "kheap.h"
+#include "gdt.h"
+#include "tss.h"
+#include "syscall.h"
+#include "usermode.h"
+#include "task.h"
 
 void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 {
@@ -30,7 +35,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic 64 - stage 2\n");
+	terminal_write("Arthic 64 - stage 4\n");
 	terminal_write("Running in 64-bit long mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
@@ -64,7 +69,21 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 
 	uint64_t cs;
 	__asm__ volatile ("mov %%cs, %0" : "=r" (cs));
-	kprintf("code selector 0x%lx, L bit set.\n\n", cs);
+	kprintf("code selector 0x%lx, L bit set.\n", cs);
+
+	gdt_install();
+	kprintf("GDT installed: kernel + user segments, TSS slot ready.\n");
+
+	{
+		uint64_t rsp;
+		__asm__ volatile ("mov %%rsp, %0" : "=r" (rsp));
+		tss_install(rsp - 512);
+	}
+	syscall_install();
+	usermode_init();
+	task_init();
+	kprintf("TSS installed. SYSCALL/SYSRET armed via STAR/LSTAR/FMASK.\n");
+	kprintf("Scheduler running: preemptive round robin on the timer.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("Interrupts enabled. Keyboard live. Type 'help'.\n\n");

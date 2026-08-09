@@ -16,6 +16,8 @@
 #include "pmm.h"
 #include "paging.h"
 #include "kheap.h"
+#include "usermode.h"
+#include "task.h"
 #include "string.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -41,6 +43,10 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  wxtest        try to write to kernel code\n");
+	kprintf("  tasks         list threads\n");
+	kprintf("  spawn         start a thread that counts to five\n");
+	kprintf("  kill <id>     terminate a task\n");
+	kprintf("  user          drop to ring 3, use SYSCALL, come back\n");
 	kprintf("  regs          show 64-bit CPU state\n");
 	kprintf("  echo <text>   print text back\n");
 	kprintf("  clear         clear the screen\n");
@@ -48,10 +54,10 @@ static void command_help(void)
 
 static void command_about(void)
 {
-	kprintf("Arthic 64, stage 2 of the long mode port.\n");
+	kprintf("Arthic 64, stage 4 of the long mode port.\n");
 	kprintf("Boots into 64-bit, handles interrupts, reads the keyboard.\n");
-	kprintf("Memory manager, four-level paging and a heap. No filesystem\n");
-	kprintf("or processes yet - still on the 32-bit branch.\n");
+	kprintf("Memory manager, paging, heap, TSS, SYSCALL, scheduler.\n");
+	kprintf("No filesystem, no per-process address spaces yet.\n");
 }
 
 /* Show state that only exists in 64-bit, as evidence rather than assertion. */
@@ -139,6 +145,85 @@ static void command_wxtest(void)
 	kprintf("W^X: code is r-x, everything else is rw- with NX set\n");
 }
 
+/* Drop to ring 3 and run the SYSCALL demo. */
+static void command_user(void)
+{
+	kprintf("entering ring 3 (first hop via IRETQ) ...\n");
+	usermode_run();
+	kprintf("back in ring 0 (returned via SYSCALL/SYSRET or a caught fault).\n");
+}
+
+static void command_tasks(void)
+{
+	task_list();
+}
+
+static void demo_thread(void)
+{
+	struct task *me = task_current();
+	uint32_t id = me ? me->id : 0;
+
+	for (int i = 1; i <= 5; i++) {
+		task_sleep(18);
+		kprintf("[task %u] %u of 5\n", id, (uint32_t) i);
+	}
+}
+
+static void command_spawn(void)
+{
+	uint32_t id = task_create("demo", demo_thread);
+
+	if (id)
+		kprintf("spawned task %u\n", id);
+	else
+		kprintf("could not create task\n");
+}
+
+/* Parse the id, then just mark the task finished. The reaper picks it up on
+ * the next scheduling pass and frees its stack - same mechanism a task uses
+ * to end itself, applied from the outside. Task 0 is refused: it is the
+ * fallback when nothing else is runnable, and killing it would leave the
+ * scheduler with nowhere to go. A BLOCKED task is refused too, for the same
+ * reason as the 32-bit branch - it is linked into some wait queue by a
+ * pointer that queue owns, and freeing it out from under that queue would
+ * leave a dangling pointer behind. */
+static void command_kill(const char *line)
+{
+	const char *arg = line;
+	while (*arg && *arg != ' ') arg++;
+	while (*arg == ' ') arg++;
+
+	if (!*arg) {
+		kprintf("usage: kill <id>\n");
+		return;
+	}
+
+	uint32_t id = 0;
+	while (*arg >= '0' && *arg <= '9') {
+		id = id * 10 + (uint32_t)(*arg - '0');
+		arg++;
+	}
+
+	if (id == 0) {
+		kprintf("no such task, or it is task 0\n");
+		return;
+	}
+
+	struct task *t = task_by_id(id);
+	if (!t || t->state == TASK_FINISHED) {
+		kprintf("no such task, or it is task 0\n");
+		return;
+	}
+
+	if (t->state == TASK_BLOCKED) {
+		kprintf("task %u is blocked on something and cannot be killed yet\n", id);
+		return;
+	}
+
+	t->state = TASK_FINISHED;
+	kprintf("killed task %u\n", id);
+}
+
 static void command_ticks(void)
 {
 	uint32_t t = timer_get_ticks();
@@ -199,6 +284,14 @@ static void execute(const char *line)
 		command_heap();
 	else if (kstrcmp(line, "heaptest") == 0)
 		command_heaptest();
+	else if (kstrcmp(line, "user") == 0)
+		command_user();
+	else if (kstrcmp(line, "tasks") == 0)
+		command_tasks();
+	else if (kstrcmp(line, "spawn") == 0)
+		command_spawn();
+	else if (kstartswith(line, "kill "))
+		command_kill(line);
 	else if (kstrcmp(line, "wxtest") == 0)
 		command_wxtest();
 	else if (kstrcmp(line, "regs") == 0)

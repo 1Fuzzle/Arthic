@@ -29,6 +29,23 @@ SECTIONS
 	}
 	kernel_rodata_end = .;
 
+	/* Code ring 3 is allowed to execute. Page permissions apply per 4 KB
+	 * page, so anything needing different permissions from the kernel needs
+	 * its own page - hence the alignment either side. */
+	.usertext BLOCK(4K) : ALIGN(4K)
+	{
+		user_text_start = .;
+		*(.usertext)
+		. = ALIGN(4K);
+	}
+
+	.userdata BLOCK(4K) : ALIGN(4K)
+	{
+		*(.userdata)
+		. = ALIGN(4K);
+		user_text_end = .;
+	}
+
 	.data BLOCK(4K) : ALIGN(4K)
 	{
 		*(.data)

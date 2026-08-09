@@ -33,6 +33,11 @@ uint64_t paging_mapped_limit(void);
 
 int      paging_map(uint64_t virtual_addr, uint64_t physical_addr, uint64_t flags);
 void     paging_unmap(uint64_t virtual_addr);
+
+/* Mark an already-mapped range accessible from ring 3. Data gets NX; code does
+ * not, since it must remain executable - the same asymmetry as the 32-bit
+ * branch's W^X, just no longer conditional on hardware support. */
+void     paging_make_user(uint64_t start, uint64_t end, int writable);
 void     paging_set_flags(uint64_t virtual_addr, uint64_t flags);
 
 void     paging_set_fault_resume(uint64_t rip);

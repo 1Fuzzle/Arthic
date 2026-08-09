@@ -156,6 +156,23 @@ static void page_fault_handler(struct registers *regs)
 	int reserved = regs->err_code & 0x08;
 	int fetch    = regs->err_code & 0x10;
 
+	/* A fault from ring 3 is that program's problem, not the kernel's - stop
+	 * it and carry on. usermode_return does not come back here; it resumes
+	 * wherever usermode_jump was originally called from, the same trick
+	 * SYS_EXIT uses. A fault at ring 0 means the kernel itself is broken and
+	 * stays fatal. */
+	if (user) {
+		kprintf("\n*** program terminated: %s at 0x%lx (rip 0x%lx)\n",
+		        fetch   ? "tried to execute non-executable memory"
+		        : present ? (write ? "wrote to read-only memory"
+		                           : "protection violation")
+		                  : "touched unmapped memory",
+		        faulting_address, regs->rip);
+
+		extern void usermode_return(void);
+		usermode_return();
+	}
+
 	kprintf("\n*** PAGE FAULT at 0x%lx\n", faulting_address);
 	kprintf("    rip=0x%lx  cause: %s, %s, %s%s\n",
 	        regs->rip,
@@ -226,4 +243,36 @@ void paging_init(void)
 uint64_t paging_mapped_limit(void)
 {
 	return mapped_limit;
+}
+
+/* Grant ring 3 access to a range that paging_init already mapped for the
+ * kernel.
+ *
+ * Permissions are ANDed going down the levels, so USER has to be set at every
+ * level along the path, not only at the leaf - an upper table that still says
+ * "kernel only" blocks access regardless of what the page itself allows. This
+ * only relaxes existing entries; it never creates new ones, so it is only
+ * valid for addresses paging_init already mapped, which is true for anything
+ * inside the identity-mapped gigabyte.
+ */
+void paging_make_user(uint64_t start, uint64_t end, int writable)
+{
+	uint64_t flags = PAGE_PRESENT | PAGE_USER;
+
+	if (writable)
+		flags |= PAGE_WRITE | PAGE_NX;   /* writable data is never executable */
+
+	for (uint64_t addr = start & ~0xFFFull; addr < end; addr += PAGE_SIZE) {
+		pml4[pml4_index(addr)] |= PAGE_USER;
+
+		uint64_t *pdpt = (uint64_t *)(pml4[pml4_index(addr)] & 0x000FFFFFFFFFF000ull);
+		if (!pdpt) continue;
+		pdpt[pdpt_index(addr)] |= PAGE_USER;
+
+		uint64_t *pd = (uint64_t *)(pdpt[pdpt_index(addr)] & 0x000FFFFFFFFFF000ull);
+		if (!pd) continue;
+		pd[pd_index(addr)] |= PAGE_USER;
+
+		paging_set_flags(addr, flags);
+	}
 }

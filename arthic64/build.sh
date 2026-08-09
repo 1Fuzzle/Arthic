@@ -36,7 +36,7 @@ fi
 
 mkdir -p "$BUILD"
 
-for src in boot/boot.s kernel/interrupts.s; do
+for src in boot/boot.s kernel/interrupts.s kernel/syscall_entry.s kernel/switch.s; do
 	obj="$BUILD/$(basename "$src" .s).o"
 	echo "assembling $src"
 	gcc -m64 -c "$src" -o "$obj"
@@ -44,6 +44,7 @@ done
 
 for src in kernel/main.c kernel/idt.c kernel/shell.c \
            mm/pmm.c mm/paging.c mm/kheap.c \
+           kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"

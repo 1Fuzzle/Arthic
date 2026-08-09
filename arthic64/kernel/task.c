@@ -1,0 +1,346 @@
+/* task.c - kernel threads and a round-robin scheduler, 64-bit.
+ *
+ * Ported straight from the 32-bit branch; the algorithm does not care about
+ * register width. What is genuinely different, and worth reading closely, is
+ * how a new thread's first stack frame is faked, and how the TSS interacts
+ * with a running scheduler now that SYSCALL exists alongside interrupts.
+ *
+ * FAKING A NEW THREAD'S FIRST RUN
+ *
+ * task_switch always resumes by popping seven values and executing `ret`.
+ * That is correct for a thread that has run before - its stack holds exactly
+ * what a previous switch put there. A brand new thread has never run, so
+ * there is nothing on its stack yet. The fix is to write what a switch WOULD
+ * have pushed by hand: return address at the top (task_entry_trampoline),
+ * then six callee-saved slots and a flags word beneath it. The first switch
+ * into it pops plausible-looking garbage into rbx/rbp/r12-r15/flags and
+ * `ret`s straight into the trampoline, unable to tell it was never running.
+ *
+ * WHY A TRAMPOLINE AND NOT THE ENTRY FUNCTION DIRECTLY
+ *
+ * `ret` needs an address to jump to; it cannot also hand that address an
+ * argument the way a `call` would. So the trampoline is what actually runs
+ * first - a few instructions that pick the entry point up from a register the
+ * stack setup put it in, then jumps for real. It also means a thread whose
+ * function simply returns lands somewhere sensible (task_exit) instead of
+ * running off into whatever bytes follow.
+ *
+ * TWO SEPARATE KERNEL STACKS, PER TASK
+ *
+ * Interrupts and exceptions arriving while a task runs use TSS.RSP0, switched
+ * by the scheduler on every task switch, same idea as the 32-bit branch.
+ * SYSCALL does not consult the TSS at all - it uses the dedicated scratch
+ * stack behind swapgs in kernel/syscall.c, which for now is shared by every
+ * task rather than per-task. That is fine as long as only one task is ever
+ * inside a syscall handler at once, which is true on a single core with
+ * interrupts off across the syscall entry - worth revisiting the moment
+ * either of those stops being true.
+ */
+
+#include "task.h"
+#include "pmm.h"
+#include "kheap.h"
+#include "string.h"
+#include "terminal.h"
+#include "timer.h"
+#include "tss.h"
+
+#define STACK_FRAMES 2   /* 8 KB per thread */
+
+extern void task_switch(uint64_t *save_esp_here, uint64_t new_esp);
+extern void task_entry_trampoline(void);
+
+static struct task *current   = 0;
+static struct task *task_ring = 0;
+static uint32_t     next_id   = 0;
+static int          enabled   = 0;
+static uint32_t     switches  = 0;
+
+/* The entry point a newly created thread should jump to, handed across via a
+ * register the trampoline reads once and only once. A global rather than a
+ * stack slot because the trampoline runs before it has any stack frame of its
+ * own to hold an argument in - it IS the very first instruction executed. */
+uint64_t task_trampoline_target = 0;
+
+static void copy_name(char *dest, const char *src)
+{
+	int i = 0;
+	while (src[i] && i < TASK_NAME_MAX - 1) {
+		dest[i] = src[i];
+		i++;
+	}
+	dest[i] = '\0';
+}
+
+void task_init(void)
+{
+	struct task *t = (struct task *) kmalloc(sizeof(struct task));
+	if (!t) {
+		kprintf("task: cannot allocate the initial task\n");
+		return;
+	}
+
+	kmemset(t, 0, sizeof(*t));
+
+	copy_name(t->name, "kernel");
+	t->id    = next_id++;
+	t->state = TASK_RUNNING;
+	t->next  = t;
+
+	uint64_t rsp_now;
+	__asm__ volatile ("mov %%rsp, %0" : "=r" (rsp_now));
+	t->kernel_stack_top = rsp_now - 512;
+
+	current   = t;
+	task_ring = t;
+	enabled   = 1;
+}
+
+uint32_t task_create(const char *name, void (*entry)(void))
+{
+	if (!enabled)
+		return 0;
+
+	struct task *t = (struct task *) kmalloc(sizeof(struct task));
+	if (!t)
+		return 0;
+
+	kmemset(t, 0, sizeof(*t));
+
+	uint64_t stack = pmm_alloc_frames(STACK_FRAMES);
+	if (!stack) {
+		kfree(t);
+		return 0;
+	}
+
+	t->stack_base   = stack;
+	t->stack_frames = STACK_FRAMES;
+
+	/* Highest address first - stacks grow down. This is the fake frame
+	 * task_switch expects: the trampoline's address where a return address
+	 * belongs, then the six callee-saved slots and flags task_switch will
+	 * pop, in the exact order it pops them. */
+	uint64_t *sp = (uint64_t *)(stack + STACK_FRAMES * PAGE_SIZE);
+
+	*(--sp) = (uint64_t) task_entry_trampoline;
+	*(--sp) = 0x202;   /* rflags - IF set, nothing else */
+	*(--sp) = 0;       /* rbx */
+	*(--sp) = 0;       /* rbp */
+	*(--sp) = 0;       /* r12 */
+	*(--sp) = 0;       /* r13 */
+	*(--sp) = 0;       /* r14 */
+	*(--sp) = 0;       /* r15 */
+
+	t->esp              = (uint64_t) sp;
+	t->kernel_stack_top  = t->esp;   /* refined properly once it first runs;
+	                                  * placeholder so it is never zero */
+	t->id    = next_id++;
+	t->state = TASK_READY;
+	copy_name(t->name, name);
+
+	/* The trampoline needs to know where to jump. It reads this exactly once,
+	 * right after the fake frame above hands it control, and it does so
+	 * before this new task could possibly be preempted by another task_create
+	 * racing to overwrite it - the new task is not on the run ring yet, so it
+	 * cannot be scheduled until the splice below completes with interrupts
+	 * off. */
+	task_trampoline_target = (uint64_t) entry;
+
+	__asm__ volatile ("cli");
+	t->next       = current->next;
+	current->next = t;
+	__asm__ volatile ("sti");
+
+	return t->id;
+}
+
+static void reap(struct task *prev, struct task *dead)
+{
+	prev->next = dead->next;
+
+	for (uint64_t i = 0; i < dead->stack_frames; i++)
+		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
+
+	kfree(dead);
+}
+
+static void wake_sleepers(void)
+{
+	uint32_t now = timer_get_ticks();
+	struct task *t = task_ring;
+	uint32_t guard = 0;
+
+	do {
+		if (t->state == TASK_SLEEPING && now >= t->wake_tick)
+			t->state = TASK_READY;
+		t = t->next;
+	} while (t != task_ring && guard++ < 64);
+}
+
+uint64_t irq_save(void)
+{
+	uint64_t flags;
+	__asm__ volatile ("pushfq; popq %0; cli" : "=r" (flags) :: "memory");
+	return flags;
+}
+
+void irq_restore(uint64_t flags)
+{
+	if (flags & 0x200)
+		__asm__ volatile ("sti" ::: "memory");
+}
+
+void task_schedule(void)
+{
+	if (!enabled || !current)
+		return;
+
+	uint64_t flags = irq_save();
+
+	wake_sleepers();
+
+	struct task *prev = current;
+	struct task *scan = current;
+	struct task *next = 0;
+	uint32_t guard = 0;
+
+	while (guard++ < 64) {
+		struct task *candidate = scan->next;
+
+		if (candidate == current)
+			break;
+
+		if (candidate->state == TASK_FINISHED) {
+			reap(scan, candidate);
+			continue;
+		}
+
+		if (candidate->state == TASK_READY) {
+			next = candidate;
+			break;
+		}
+
+		scan = candidate;
+	}
+
+	if (!next) {
+		if (current->state == TASK_RUNNING) {
+			irq_restore(flags);
+			return;
+		}
+		next = task_ring;
+	}
+
+	if (current->state == TASK_RUNNING)
+		current->state = TASK_READY;
+
+	next->state = TASK_RUNNING;
+	current     = next;
+	switches++;
+
+	if (next->kernel_stack_top)
+		tss_set_kernel_stack(next->kernel_stack_top);
+
+	task_switch(&prev->esp, next->esp);
+
+	irq_restore(flags);
+}
+
+void task_yield(void)
+{
+	task_schedule();
+}
+
+void task_sleep(uint32_t ticks)
+{
+	if (!enabled || !current || current == task_ring) {
+		uint32_t target = timer_get_ticks() + ticks;
+		while (timer_get_ticks() < target)
+			__asm__ volatile ("hlt");
+		return;
+	}
+
+	current->wake_tick = timer_get_ticks() + ticks;
+	current->state     = TASK_SLEEPING;
+
+	task_schedule();
+}
+
+void task_block(void)
+{
+	if (!enabled || !current)
+		return;
+
+	if (current == task_ring) {
+		task_yield();
+		return;
+	}
+
+	current->state = TASK_BLOCKED;
+	task_schedule();
+}
+
+void task_unblock(struct task *t)
+{
+	if (t && t->state == TASK_BLOCKED)
+		t->state = TASK_READY;
+}
+
+void task_exit(void)
+{
+	if (current)
+		current->state = TASK_FINISHED;
+
+	for (;;)
+		task_schedule();
+}
+
+uint32_t task_switch_count(void)
+{
+	return switches;
+}
+
+struct task *task_by_id(uint32_t id)
+{
+	struct task *t = task_ring;
+	uint32_t guard = 0;
+
+	do {
+		if (t->id == id)
+			return t;
+		t = t->next;
+	} while (t != task_ring && guard++ < 64);
+
+	return 0;
+}
+
+struct task *task_current(void)
+{
+	return current;
+}
+
+void task_list(void)
+{
+	if (!enabled) {
+		kprintf("scheduler not running\n");
+		return;
+	}
+
+	struct task *t = task_ring;
+	uint32_t guard = 0;
+
+	kprintf("  %u context switches so far\n", switches);
+	kprintf("  id  state     name\n");
+
+	do {
+		const char *state = t->state == TASK_RUNNING  ? "running "
+		                  : t->state == TASK_READY    ? "ready   "
+		                  : t->state == TASK_SLEEPING ? "sleeping"
+		                  : t->state == TASK_BLOCKED  ? "blocked "
+		                  :                             "finished";
+
+		kprintf("  %u   %s  %s\n", t->id, state, t->name);
+
+		t = t->next;
+	} while (t != task_ring && guard++ < 32);
+}

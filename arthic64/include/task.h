@@ -1,0 +1,57 @@
+/* task.h - kernel threads and the scheduler, 64-bit.
+ *
+ * Same idea as the 32-bit branch: everything so far has been one thread of
+ * control, borrowed briefly by interrupts and handed straight back. A
+ * scheduler makes several threads exist, each with its own stack, and lets
+ * the timer decide which one runs - preemptive, none of them cooperating,
+ * none of them aware they were ever interrupted.
+ */
+#ifndef ARTHIC_TASK_H
+#define ARTHIC_TASK_H
+
+#include <stdint.h>
+
+#define TASK_NAME_MAX 16
+
+enum task_state {
+	TASK_READY,
+	TASK_RUNNING,
+	TASK_SLEEPING,
+	TASK_BLOCKED,
+	TASK_FINISHED
+};
+
+struct task {
+	/* MUST be the first field - switch.s writes the saved stack pointer
+	 * through a plain pointer to the struct, so its offset has to be zero. */
+	uint64_t esp;   /* named esp for continuity with the 32-bit branch's
+	                 * comments and tooling; it holds RSP */
+
+	uint32_t     id;
+	char         name[TASK_NAME_MAX];
+	enum task_state state;
+	uint64_t     stack_base;
+	uint64_t     stack_frames;
+	uint64_t     wake_tick;
+	uint64_t     kernel_stack_top;   /* TSS.RSP0 while this task runs */
+	struct task *wait_next;
+	struct task *next;
+};
+
+void         task_init(void);
+uint32_t     task_create(const char *name, void (*entry)(void));
+void         task_schedule(void);
+void         task_exit(void);
+void         task_yield(void);
+void         task_sleep(uint32_t ticks);
+void         task_block(void);
+void         task_unblock(struct task *t);
+uint32_t     task_switch_count(void);
+void         task_list(void);
+struct task *task_current(void);
+struct task *task_by_id(uint32_t id);
+
+uint64_t irq_save(void);
+void     irq_restore(uint64_t flags);
+
+#endif
