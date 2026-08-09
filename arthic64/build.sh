@@ -24,8 +24,29 @@ INCLUDE=include
 #                         only when an interrupt lands in the wrong instruction.
 #   -mgeneral-regs-only   no SSE registers, which are not saved on interrupt
 #   -fno-pie -no-pie      no position-independent code
+#   -fstack-protector-all a canary in every function with a local array,
+#                         checked on return. Needs __stack_chk_guard and
+#                         __stack_chk_fail to exist - see kernel/ssp.c. This
+#                         flag was -fno-stack-protector in every earlier
+#                         version of this file, because those two symbols did
+#                         not exist yet - not because stack smashing did not
+#                         matter.
+#   -mstack-protector-guard=global
+#                         REQUIRED alongside the flag above, and easy to miss.
+#                         On x86_64, GCC's DEFAULT is to read the canary from
+#                         %fs:0x28 - a thread-local-storage slot glibc sets up,
+#                         which nothing in this kernel provides. Without this
+#                         flag, every canary check compares that fixed,
+#                         meaningless address against itself, always passes
+#                         regardless of what actually happened to the stack,
+#                         and __stack_chk_guard sits linked in and completely
+#                         unread. This flag tells GCC to use a plain global
+#                         symbol instead - exactly the one kernel/ssp.c
+#                         defines - which is the convention every freestanding
+#                         x86_64 kernel actually uses for this reason.
 CFLAGS="-m64 -std=gnu11 -ffreestanding -nostdlib -fno-builtin \
-        -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
+        -fstack-protector-all -mstack-protector-guard=global \
+        -mno-red-zone -mgeneral-regs-only \
         -fno-pie -I$INCLUDE -Wall -Wextra -O2"
 
 if [ "$1" = "clean" ]; then
@@ -42,7 +63,15 @@ mkdir -p "$BUILD"
 # kernel carries no copy of it - unlike stage 3's embedded demo, this one is
 # read off ArthicFS at run time.
 echo "compiling  user/prog.c"
-gcc $CFLAGS -c user/prog.c -o "$BUILD/prog.o"
+# Deliberately NOT $CFLAGS here - the stack protector needs __stack_chk_fail,
+# which lives in kernel/ssp.c and is not linked into this standalone program.
+# A user program wanting the same protection would need its own copy of that
+# symbol, the same way it has its own copy of everything else it needs -
+# nothing about ring 3 shares code with the kernel by default.
+USER_CFLAGS="-m64 -std=gnu11 -ffreestanding -nostdlib -fno-builtin \
+        -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
+        -fno-pie -I$INCLUDE -Wall -Wextra -O2"
+gcc $USER_CFLAGS -c user/prog.c -o "$BUILD/prog.o"
 
 echo "linking    user program (ELF64)"
 ld -m elf_x86_64 -T user/prog.ld -o "$BUILD/prog.elf" "$BUILD/prog.o"
@@ -72,7 +101,7 @@ done
 for src in kernel/main.c kernel/idt.c kernel/shell.c \
            mm/pmm.c mm/paging.c mm/kheap.c \
            kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/pipe.c \
-           drivers/ata.c fs/fs.c kernel/loader.c \
+           drivers/ata.c fs/fs.c kernel/loader.c kernel/ssp.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"

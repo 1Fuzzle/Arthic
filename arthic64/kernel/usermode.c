@@ -67,8 +67,26 @@ extern void usermode_jump(uint64_t entry, uint64_t user_stack_top);
  * `noinline` is the fix, and it is the one real syscall wrappers actually use
  * for exactly this reason: it guarantees ONE compiled copy of this function,
  * reached by a real `call` every time, so there is no second inlined instance
- * for the optimiser to fold this one into. */
-__attribute__((section(".usertext"), noinline))
+ * for the optimiser to fold this one into.
+ *
+ * `no_stack_protector` is a fourth lesson, found later, in the standalone
+ * loader's user/prog.c, and it applies here for the same reason: once the
+ * kernel build turned the stack protector on, every function - including
+ * these two, which are compiled with the kernel's own flags despite running
+ * in ring 3 - got a canary check inserted automatically. The canary variable,
+ * __stack_chk_guard, is kernel memory that was never marked user-accessible,
+ * so ring 3 code trying to read it page-faulted immediately, reported as a
+ * generic "protection violation" with no obvious connection to stack
+ * protection at all. Anything meant to run in ring 3 needs this attribute for
+ * as long as it shares a build with kernel code that has the protector on.
+ *
+ * The clobber list also lacked rdx/rsi/r8/r9/r10 until this pass - the same
+ * incomplete list, and the same latent bug, as the one that produced a wrong
+ * checksum in user/prog.c. It had not yet caused a visible symptom here only
+ * because nothing after these calls happened to need a register the kernel
+ * was free to disturb - which is precisely why an incomplete clobber list is
+ * dangerous: it can sit correct-by-accident for a long time. */
+__attribute__((section(".usertext"), noinline, no_stack_protector))
 static uint64_t user_syscall(uint64_t number, uint64_t arg)
 {
 	uint64_t ret;
@@ -76,7 +94,7 @@ static uint64_t user_syscall(uint64_t number, uint64_t arg)
 		"syscall"
 		: "=a"(ret)
 		: "a"(number), "D"(arg)
-		: "rcx", "r11", "memory"
+		: "rcx", "r11", "rdx", "rsi", "r8", "r9", "r10", "memory"
 	);
 	return ret;
 }
@@ -90,7 +108,10 @@ static const char msg2[] = "  [ring 3] trying to read kernel memory\n";
 __attribute__((section(".userdata")))
 static const char msg3[] = "  [ring 3] now writing to my own code segment\n";
 
-__attribute__((section(".usertext")))
+/* Runs in ring 3, so it needs no_stack_protector for exactly the reason
+ * explained above user_syscall - the canary it would otherwise read is
+ * kernel-only memory. */
+__attribute__((section(".usertext"), no_stack_protector))
 void user_program(void)
 {
 	user_syscall(SYS_WRITE, (uint64_t) msg1);
@@ -133,7 +154,9 @@ void usermode_init(void)
 	paging_make_user(text_start, text_end, 0);
 	paging_make_user(user_stack_phys, user_stack_phys + USER_STACK_PAGES * PAGE_SIZE, 1);
 
-	syscall_set_user_range(text_start, user_stack_phys + USER_STACK_PAGES * PAGE_SIZE);
+	/* Deliberately NOT calling syscall_set_user_range here any more - see the
+	 * comment in usermode_run for why setting it once at boot was a real bug
+	 * that this fixes. */
 }
 
 void usermode_run(void)
@@ -142,6 +165,20 @@ void usermode_run(void)
 		kprintf("usermode: not initialised\n");
 		return;
 	}
+
+	/* syscall_set_user_range is GLOBAL, shared with the ELF loader in
+	 * loader.c, which sets it fresh every time program_task runs a program.
+	 * Setting it once here at boot, as this used to do, meant that running
+	 * this demo AFTER running any loaded program left the range pointing at
+	 * whatever the LOADER last set it to - a different address range
+	 * entirely - and every syscall this demo made was rejected as having a
+	 * "bad" pointer that was, in fact, perfectly valid for this demo, just
+	 * not for whichever program ran last. Setting it fresh on every entry,
+	 * the same discipline the loader already follows, is what actually fixes
+	 * that rather than merely working by accident when nothing else runs
+	 * first. */
+	syscall_set_user_range((uint64_t) &user_text_start,
+	                       user_stack_phys + USER_STACK_PAGES * PAGE_SIZE);
 
 	/* TSS.rsp0 is for genuine interrupts and exceptions arriving while ring 3
 	 * runs - the timer, a fault. It is a completely different mechanism from

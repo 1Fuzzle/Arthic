@@ -36,6 +36,11 @@ Keep both. Do not delete v2.4 to make room for this.
   `pipetest`, `pipestat`, `ls`, `cat`, `write`, `append`, `rm`, `df`,
   `format`, `install`, `run`, `echo`, `clear`
 
+- **Stack canaries**, real ones: every function gets a guard value checked on
+  return, and a deliberate 48-byte overflow into a 16-byte buffer is caught
+  and halted rather than silently corrupting the stack. `ssptest` in the shell
+  demonstrates it.
+
 At this point the two branches are at feature parity. Everything the 32-bit
 branch does, this one now does too - the remaining differences are the ones
 64-bit was built for: NX without PAE, more address space, a wider ABI.

@@ -48,6 +48,7 @@ static void command_help(void)
 	kprintf("  heap          heap usage\n");
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  wxtest        try to write to kernel code\n");
+	kprintf("  ssptest       deliberately overrun a buffer - should halt cleanly\n");
 	kprintf("  tasks         list threads\n");
 	kprintf("  spawn         start a thread that counts to five\n");
 	kprintf("  kill <id>     terminate a task\n");
@@ -562,6 +563,43 @@ static void command_kill(const char *line)
 	kprintf("killed task %u\n", id);
 }
 
+/* Deliberately overrun a local array's bounds by exactly enough to reach past
+ * where the compiler placed this function's canary, without going so far
+ * that it also reaches the return address and crashes some OTHER way before
+ * the check even gets a chance to run. This is not a hypothetical - it is the
+ * single most common memory-safety bug in C, done on purpose so the catch can
+ * be seen rather than taken on faith.
+ *
+ * `buffer` is volatile for a reason that has nothing to do with hardware: a
+ * plain local array that is written but never read is, from the optimiser's
+ * point of view, dead code - nothing observes its final contents, so at -O2
+ * GCC legitimately deleted the entire loop the first time this was written,
+ * and the canary machinery ran against nothing, always "passing" for a
+ * reason that had nothing to do with stack protection working. `volatile`
+ * forces every store to be treated as having an observable effect, which is
+ * the only way to make a deliberately-unused overflow survive optimisation
+ * at all. */
+__attribute__((noinline))
+static void smash_the_stack(void)
+{
+	volatile char buffer[16];
+
+	kprintf("writing 48 bytes into a 16-byte buffer ...\n");
+
+	for (int i = 0; i < 48; i++)
+		buffer[i] = 'X';
+
+	/* Unreachable if the canary catches it, which is the point - the halt
+	 * happens inside __stack_chk_fail before this function's epilogue, and
+	 * therefore before this line, ever runs. */
+	kprintf("SURVIVED - the stack protector did not catch this\n");
+}
+
+static void command_ssptest(void)
+{
+	smash_the_stack();
+}
+
 static void command_ticks(void)
 {
 	uint32_t t = timer_get_ticks();
@@ -658,6 +696,8 @@ static void execute(const char *line)
 		command_kill(line);
 	else if (kstrcmp(line, "wxtest") == 0)
 		command_wxtest();
+	else if (kstrcmp(line, "ssptest") == 0)
+		command_ssptest();
 	else if (kstrcmp(line, "regs") == 0)
 		command_regs();
 	else if (kstrcmp(line, "clear") == 0)

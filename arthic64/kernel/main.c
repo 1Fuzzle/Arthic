@@ -18,6 +18,7 @@
 #include "paging.h"
 #include "kheap.h"
 #include "gdt.h"
+#include "ssp.h"
 #include "tss.h"
 #include "syscall.h"
 #include "usermode.h"
@@ -28,6 +29,13 @@
 
 void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 {
+	/* First thing, deliberately, before anything else that might have a
+	 * local array and therefore a canary of its own - everything from here
+	 * on gets the real guard value rather than __stack_chk_guard's default
+	 * zero-initialised state. The check itself would still be self-consistent
+	 * even with the default value - entry and exit would compare equal
+	 * either way - but a predictable guard is a much weaker one. */
+	ssp_init();
 
 	terminal_initialise();
 
