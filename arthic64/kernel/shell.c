@@ -18,6 +18,8 @@
 #include "kheap.h"
 #include "usermode.h"
 #include "task.h"
+#include "lock.h"
+#include "pipe.h"
 #include "string.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -46,6 +48,10 @@ static void command_help(void)
 	kprintf("  tasks         list threads\n");
 	kprintf("  spawn         start a thread that counts to five\n");
 	kprintf("  kill <id>     terminate a task\n");
+	kprintf("  racetest      two threads, no lock - watch updates vanish\n");
+	kprintf("  locktest      the same test with a mutex\n");
+	kprintf("  pipetest      a producer and consumer sharing a pipe\n");
+	kprintf("  pipestat      pipe contents and how often each side blocked\n");
 	kprintf("  user          drop to ring 3, use SYSCALL, come back\n");
 	kprintf("  regs          show 64-bit CPU state\n");
 	kprintf("  echo <text>   print text back\n");
@@ -56,7 +62,7 @@ static void command_about(void)
 {
 	kprintf("Arthic 64, stage 4 of the long mode port.\n");
 	kprintf("Boots into 64-bit, handles interrupts, reads the keyboard.\n");
-	kprintf("Memory manager, paging, heap, TSS, SYSCALL, scheduler.\n");
+	kprintf("Memory manager, paging, heap, TSS, SYSCALL, scheduler, locks, pipes.\n");
 	kprintf("No filesystem, no per-process address spaces yet.\n");
 }
 
@@ -151,6 +157,145 @@ static void command_user(void)
 	kprintf("entering ring 3 (first hop via IRETQ) ...\n");
 	usermode_run();
 	kprintf("back in ring 0 (returned via SYSCALL/SYSRET or a caught fault).\n");
+}
+
+/* ---- Race conditions -----------------------------------------------------
+ * Forced with a deliberate task_yield between read and write so it fails
+ * every time rather than once in ten thousand runs - the bug is real either
+ * way, only its frequency is rigged for demonstration.
+ */
+#define INCREMENTS 200
+
+static volatile uint64_t shared_counter = 0;
+static volatile uint64_t workers_done   = 0;
+static struct mutex      counter_lock;
+static int               use_lock = 0;
+
+static void counter_thread(void)
+{
+	for (uint64_t i = 0; i < INCREMENTS; i++) {
+		if (use_lock)
+			mutex_lock(&counter_lock);
+
+		uint64_t value = shared_counter;
+		task_yield();
+		shared_counter = value + 1;
+
+		if (use_lock)
+			mutex_unlock(&counter_lock);
+	}
+
+	workers_done++;
+}
+
+static void run_counter_test(int locked)
+{
+	shared_counter = 0;
+	workers_done   = 0;
+	use_lock       = locked;
+	mutex_init(&counter_lock);
+
+	kprintf("two threads, %lu increments each, %s\n",
+	        (uint64_t) INCREMENTS, locked ? "WITH a mutex" : "with NO lock");
+
+	if (!task_create("count", counter_thread) ||
+	    !task_create("count", counter_thread)) {
+		kprintf("could not create threads\n");
+		return;
+	}
+
+	while (workers_done < 2)
+		task_yield();
+
+	uint64_t expected = 2 * INCREMENTS;
+
+	kprintf("expected %lu, got %lu", expected, shared_counter);
+
+	if (shared_counter == expected)
+		kprintf("  - correct\n");
+	else
+		kprintf("  - LOST %lu updates\n", expected - shared_counter);
+
+	if (locked)
+		kprintf("blocked on the lock %lu times\n", counter_lock.contended);
+}
+
+static void command_racetest(void) { run_counter_test(0); }
+static void command_locktest(void) { run_counter_test(1); }
+
+/* ---- Pipes ------------------------------------------------------------- */
+static struct pipe demo_pipe;
+static volatile int pipe_running = 0;
+
+static void producer_thread(void)
+{
+	char message[] = "message 00 from the producer\n";
+
+	for (int i = 1; i <= 40; i++) {
+		message[8] = (char)('0' + (i / 10) % 10);
+		message[9] = (char)('0' + i % 10);
+
+		uint64_t length = 0;
+		while (message[length]) length++;
+
+		pipe_write(&demo_pipe, message, length);
+	}
+
+	pipe_write(&demo_pipe, "END", 3);
+	pipe_running--;
+}
+
+static void consumer_thread(void)
+{
+	char chunk[64];
+
+	for (;;) {
+		uint64_t got = pipe_read(&demo_pipe, chunk, sizeof(chunk) - 1);
+		chunk[got] = '\0';
+
+		task_sleep(2);
+
+		int done = 0;
+		for (uint64_t i = 0; i + 2 < got; i++)
+			if (chunk[i]=='E' && chunk[i+1]=='N' && chunk[i+2]=='D')
+				done = 1;
+
+		kprintf("%s", chunk);
+
+		if (done) break;
+	}
+
+	pipe_running--;
+}
+
+static void command_pipetest(void)
+{
+	if (pipe_running) {
+		kprintf("a pipe test is already running\n");
+		return;
+	}
+
+	pipe_init(&demo_pipe);
+	pipe_running = 2;
+
+	kprintf("producer sends 40 messages through a %lu byte pipe\n",
+	        (uint64_t) PIPE_CAPACITY);
+
+	if (!task_create("producer", producer_thread) ||
+	    !task_create("consumer", consumer_thread)) {
+		kprintf("could not create the threads\n");
+		pipe_running = 0;
+	}
+}
+
+static void command_pipestat(void)
+{
+	uint64_t reads, writes;
+	pipe_stats(&demo_pipe, &reads, &writes);
+
+	kprintf("  %lu bytes waiting in the pipe\n", pipe_available(&demo_pipe));
+	kprintf("  reader blocked %lu times, writer blocked %lu times\n",
+	        reads, writes);
 }
 
 static void command_tasks(void)
@@ -290,6 +435,14 @@ static void execute(const char *line)
 		command_tasks();
 	else if (kstrcmp(line, "spawn") == 0)
 		command_spawn();
+	else if (kstrcmp(line, "racetest") == 0)
+		command_racetest();
+	else if (kstrcmp(line, "locktest") == 0)
+		command_locktest();
+	else if (kstrcmp(line, "pipetest") == 0)
+		command_pipetest();
+	else if (kstrcmp(line, "pipestat") == 0)
+		command_pipestat();
 	else if (kstartswith(line, "kill "))
 		command_kill(line);
 	else if (kstrcmp(line, "wxtest") == 0)

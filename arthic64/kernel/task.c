@@ -56,12 +56,6 @@ static uint32_t     next_id   = 0;
 static int          enabled   = 0;
 static uint32_t     switches  = 0;
 
-/* The entry point a newly created thread should jump to, handed across via a
- * register the trampoline reads once and only once. A global rather than a
- * stack slot because the trampoline runs before it has any stack frame of its
- * own to hold an argument in - it IS the very first instruction executed. */
-uint64_t task_trampoline_target = 0;
-
 static void copy_name(char *dest, const char *src)
 {
 	int i = 0;
@@ -123,13 +117,28 @@ uint32_t task_create(const char *name, void (*entry)(void))
 	uint64_t *sp = (uint64_t *)(stack + STACK_FRAMES * PAGE_SIZE);
 
 	*(--sp) = (uint64_t) task_entry_trampoline;
-	*(--sp) = 0x202;   /* rflags - IF set, nothing else */
-	*(--sp) = 0;       /* rbx */
-	*(--sp) = 0;       /* rbp */
-	*(--sp) = 0;       /* r12 */
-	*(--sp) = 0;       /* r13 */
-	*(--sp) = 0;       /* r14 */
-	*(--sp) = 0;       /* r15 */
+	*(--sp) = 0x202;         /* rflags - IF set, nothing else */
+	*(--sp) = 0;             /* rbx */
+	*(--sp) = 0;             /* rbp */
+	*(--sp) = 0;             /* r12 */
+	*(--sp) = 0;             /* r13 */
+	*(--sp) = 0;             /* r14 */
+	*(--sp) = (uint64_t) entry;   /* r15 - see the note in switch.s: the
+	                               * trampoline reads the entry point back out
+	                               * of this exact register, per task, on its
+	                               * own stack. A shared global here was the
+	                               * actual bug: creating two tasks with
+	                               * DIFFERENT entry functions before either
+	                               * had run left one global holding only the
+	                               * LAST value written, and the first task to
+	                               * actually execute jumped into the wrong
+	                               * function entirely. `spawn`, which always
+	                               * reuses one entry function for every task,
+	                               * could never have exposed this - both
+	                               * "wrong" values would have been identical.
+	                               * Carrying it in a per-task saved register
+	                               * instead means there is nothing to share
+	                               * and nothing to race. */
 
 	t->esp              = (uint64_t) sp;
 	t->kernel_stack_top  = t->esp;   /* refined properly once it first runs;
@@ -137,14 +146,6 @@ uint32_t task_create(const char *name, void (*entry)(void))
 	t->id    = next_id++;
 	t->state = TASK_READY;
 	copy_name(t->name, name);
-
-	/* The trampoline needs to know where to jump. It reads this exactly once,
-	 * right after the fake frame above hands it control, and it does so
-	 * before this new task could possibly be preempted by another task_create
-	 * racing to overwrite it - the new task is not on the run ring yet, so it
-	 * cannot be scheduled until the splice below completes with interrupts
-	 * off. */
-	task_trampoline_target = (uint64_t) entry;
 
 	__asm__ volatile ("cli");
 	t->next       = current->next;

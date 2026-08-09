@@ -60,8 +60,11 @@ task_switch:
 
 .global task_entry_trampoline
 task_entry_trampoline:
-	movq task_trampoline_target(%rip), %rax
-	call *%rax
+	/* r15 was just restored by task_switch's pops, immediately before the
+	 * `ret` that landed us here - task_create put the entry point there
+	 * specifically so this moment would find it waiting, per task, with no
+	 * shared state involved at all. */
+	call *%r15
 
 	/* A thread whose function returns normally lands here rather than
 	 * running into whatever bytes happen to follow. */

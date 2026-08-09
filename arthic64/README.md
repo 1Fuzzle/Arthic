@@ -21,13 +21,16 @@ Keep both. Do not delete v2.4 to make room for this.
 - Recoverable page faults
 - A preemptive round-robin scheduler: kernel threads with their own stacks,
   switched by the timer, with sleeping, blocking, and finished threads reaped
+- Mutexes (xchg-based, FIFO wait queue) and pipes (bounded ring buffer,
+  blocking both ways) - direct ports; neither cares about register width
 - A shell: `help`, `about`, `ticks`, `regs`, `mem`, `heap`, `heaptest`,
-  `wxtest`, `user`, `tasks`, `spawn`, `kill`, `echo`, `clear`
+  `wxtest`, `user`, `tasks`, `spawn`, `kill`, `racetest`, `locktest`,
+  `pipetest`, `pipestat`, `echo`, `clear`
 
 ## What is not here yet
 
-locks, pipes, disk driver, filesystem, ELF loader, per-process address spaces.
-All of that exists on the 32-bit branch and has to be brought across.
+disk driver, filesystem, ELF loader, per-process address spaces. All of that
+exists on the 32-bit branch and has to be brought across.
 
 ## Building
 

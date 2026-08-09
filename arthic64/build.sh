@@ -44,7 +44,7 @@ done
 
 for src in kernel/main.c kernel/idt.c kernel/shell.c \
            mm/pmm.c mm/paging.c mm/kheap.c \
-           kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c \
+           kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/pipe.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
