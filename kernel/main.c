@@ -8,7 +8,6 @@
 #include <stdint.h>
 
 #include "terminal.h"
-#include "serial.h"
 #include "gdt.h"
 #include "idt.h"
 #include "timer.h"
@@ -31,7 +30,6 @@
  */
 void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	terminal_initialise();
-	serial_initialise();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
 	terminal_write("  _   _   _   _   _   _\n");
@@ -95,8 +93,11 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
 	kprintf("PMM  installed: %u KB usable, %u KB in use.\n",
 	        pmm_free_frames() * 4, pmm_used_frames() * 4);
-	kprintf("Paging enabled: %u MB mapped, kernel code read-only.\n",
+	kprintf("Paging enabled (PAE): %u MB mapped, kernel code read-only.\n",
 	        paging_mapped_limit() / (1024 * 1024));
+	kprintf("NX %s - data pages %s non-executable.\n",
+	        paging_nx_available() ? "available" : "NOT available",
+	        paging_nx_available() ? "are" : "cannot be");
 	{
 		uint32_t heap_total;
 		kheap_stats(&heap_total, 0, 0);

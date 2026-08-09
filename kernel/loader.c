@@ -71,12 +71,19 @@ int loader_install(const char *name)
  * is executable whether the program asked for it or not. Long mode is where
  * that gets fixed.
  */
-static uint32_t flags_for_segment(uint32_t elf_flags)
+static uint64_t flags_for_segment(uint32_t elf_flags)
 {
-	uint32_t flags = PAGE_PRESENT | PAGE_USER;
+	uint64_t flags = PAGE_PRESENT | PAGE_USER;
 
 	if (elf_flags & PF_W)
 		flags |= PAGE_WRITE;
+
+	/* THIS is W^X, finally complete. A segment the ELF header did not mark
+	 * executable is mapped non-executable, and the CPU enforces it on every
+	 * instruction fetch. Before PAE there was no bit to express this and any
+	 * readable page was executable. */
+	if (!(elf_flags & PF_X))
+		flags |= PAGE_NX;
 
 	return flags;
 }
@@ -141,7 +148,7 @@ static int load_segment(struct program *prog, const uint8_t *file,
 	kmemset((void *) phys, 0, pages * PAGE_SIZE);
 	kmemcpy((void *)(phys + within), file + ph->offset, ph->filesz);
 
-	uint32_t flags = flags_for_segment(ph->flags);
+	uint64_t flags = flags_for_segment(ph->flags);
 
 	for (uint32_t i = 0; i < pages; i++) {
 		if (!paging_map(page_start + i * PAGE_SIZE,
@@ -157,10 +164,11 @@ static int load_segment(struct program *prog, const uint8_t *file,
 	prog->segment[prog->segments].pages = pages;
 	prog->segments++;
 
-	kprintf("  segment at 0x%x  %u bytes in file, %u in memory  %s%s\n",
+	kprintf("  segment at 0x%x  %u bytes in file, %u in memory  %s%s%s\n",
 	        ph->vaddr, ph->filesz, ph->memsz,
 	        (ph->flags & PF_R) ? "r" : "-",
-	        (ph->flags & PF_W) ? "w" : "-");
+	        (ph->flags & PF_W) ? "w" : "-",
+	        (ph->flags & PF_X) ? "x" : "-");
 
 	return 1;
 }
@@ -336,7 +344,7 @@ int loader_run(const char *name, const char *args)
 	for (uint32_t i = 0; i < stack_pages; i++) {
 		if (!paging_map(stack_bottom + i * PAGE_SIZE,
 		                prog->stack_phys + i * PAGE_SIZE,
-		                PAGE_PRESENT | PAGE_USER | PAGE_WRITE)) {
+		                PAGE_PRESENT | PAGE_USER | PAGE_WRITE | PAGE_NX)) {
 			kprintf("loader: could not map the stack\n");
 			paging_switch(saved);
 			unload(prog);
@@ -361,7 +369,7 @@ int loader_run(const char *name, const char *args)
 		dest[i] = '\0';
 
 		paging_map(USER_ARGS_ADDR, prog->args_phys,
-		           PAGE_PRESENT | PAGE_USER);
+		           PAGE_PRESENT | PAGE_USER | PAGE_NX);
 	}
 
 	paging_switch(saved);

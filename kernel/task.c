@@ -37,8 +37,7 @@
 #include "tss.h"
 #include "terminal.h"
 
-#define STACK_FRAMES 2   /* 8 KB per thread, plus 1 guard page below */
-#define GUARD_PAGE_FRAMES 1  /* 1 x 4 KB unmapped guard page */
+#define STACK_FRAMES 2   /* 8 KB per thread */
 
 extern void task_switch(uint32_t *save_esp_here, uint32_t new_esp);
 
@@ -113,35 +112,18 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
 
 	kmemset(t, 0, sizeof(*t));
 
-	/* Allocate STACK_FRAMES + GUARD_PAGE_FRAMES. The guard page sits at the
-	 * lowest address (below the stack), and the actual stack is above it.
-	 *
-	 * Layout:
-	 *   [guard page]  ← never mapped, catches overflow
-	 *   [stack top]   ← high address, where ESP starts
-	 *   [stack ...]
-	 *   [stack base]  ← low address, bottom of allocated stack
-	 *   (unmapped)    ← guard page, causes fault if accessed
-	 *
-	 * The guard page means stack overflow (ESP growing down too far) hits
-	 * unmapped memory and faults, rather than silently corrupting the next
-	 * allocation or the heap. */
-	uint32_t total_frames = GUARD_PAGE_FRAMES + STACK_FRAMES;
-	uint32_t guard_page_phys = pmm_alloc_frames(total_frames);
-	if (!guard_page_phys) {
+	uint32_t stack = pmm_alloc_frames(STACK_FRAMES);
+	if (!stack) {
 		kfree(t);
 		return 0;
 	}
 
-	/* The guard page is at the lowest address. Leave it unmapped.
-	 * The actual stack starts one page above it. */
-	t->stack_base   = guard_page_phys;  /* Lowest address, including guard */
-	t->stack_frames = STACK_FRAMES;     /* Only the usable part */
+	t->stack_base   = stack;
+	t->stack_frames = STACK_FRAMES;
 
-	/* Stack pointer starts at the top of the actual stack (not the guard).
-	 * This is guard_page_phys + (GUARD_PAGE_FRAMES * PAGE_SIZE) + (STACK_FRAMES * PAGE_SIZE)
-	 * which is the highest address we allocated. Stacks grow down from here. */
-	uint32_t *sp = (uint32_t *)(guard_page_phys + (GUARD_PAGE_FRAMES + STACK_FRAMES) * PAGE_SIZE);
+	/* Build the stack the switch expects to find. Highest address first,
+	 * because stacks grow down. */
+	uint32_t *sp = (uint32_t *)(stack + STACK_FRAMES * PAGE_SIZE);
 
 	*(--sp) = (uint32_t) task_exit;   /* where entry returns to */
 	*(--sp) = (uint32_t) entry;       /* what `ret` jumps to    */
@@ -152,8 +134,7 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
 	*(--sp) = 0;                      /* ebp */
 
 	t->esp              = (uint32_t) sp;
-	/* kernel_stack_top is now the top of the actual stack (above the guard) */
-	t->kernel_stack_top = guard_page_phys + (GUARD_PAGE_FRAMES + STACK_FRAMES) * PAGE_SIZE;
+	t->kernel_stack_top = stack + STACK_FRAMES * PAGE_SIZE;
 	t->id       = next_id++;
 	t->state    = TASK_READY;
 	t->page_dir = page_dir;
@@ -185,10 +166,7 @@ static void reap(struct task *prev, struct task *dead)
 	if (dead->on_exit)
 		dead->on_exit(dead->arg);
 
-	/* Free the stack frames. We allocated STACK_FRAMES + GUARD_PAGE_FRAMES,
-	 * but only store STACK_FRAMES in stack_frames. The loop must free the
-	 * guard page (frame 0) too. */
-	for (uint32_t i = 0; i < dead->stack_frames + GUARD_PAGE_FRAMES; i++)
+	for (uint32_t i = 0; i < dead->stack_frames; i++)
 		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
 
 	kfree(dead);

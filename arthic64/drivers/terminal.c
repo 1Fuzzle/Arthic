@@ -32,14 +32,14 @@
  * and it is the right one, which is why real kernels do the same for their
  * emergency print paths.
  */
-static inline uint32_t console_lock(void)
+static inline uint64_t console_lock(void)
 {
-	uint32_t flags;
-	__asm__ volatile ("pushfl; popl %0; cli" : "=r" (flags) :: "memory");
+	uint64_t flags;
+	__asm__ volatile ("pushfq; popq %0; cli" : "=r" (flags) :: "memory");
 	return flags;
 }
 
-static inline void console_unlock(uint32_t flags)
+static inline void console_unlock(uint64_t flags)
 {
 	if (flags & 0x200)
 		__asm__ volatile ("sti" ::: "memory");
@@ -60,13 +60,8 @@ static inline void console_unlock(uint32_t flags)
 #include <stddef.h>
 #include <stdarg.h>   /* variadic arguments — also freestanding-safe */
 
-#include "gdt.h"      /* our own header — quotes, not angle brackets */
-#include "idt.h"
 #include "io.h"        /* outb / inb now live here, shared with idt.c */
 #include "terminal.h"
-#include "keyboard.h"
-#include "shell.h"
-#include "timer.h"
 
 /* ---- The screen -----------------------------------------------------------
  * The BIOS leaves the machine in VGA text mode: an 80x25 grid of characters.
@@ -291,7 +286,7 @@ void terminal_putchar(char ch) {
  */
 void terminal_write(const char *str)
 {
-	uint32_t flags = console_lock();
+	uint64_t flags = console_lock();
 
 	for (size_t i = 0; str[i] != '\0'; i++)
 		terminal_putchar(str[i]);
@@ -319,9 +314,9 @@ void terminal_write(const char *str)
  * comfortably enough: the longest possible output here is a 32-bit number in
  * base 2, which would be 32 digits, and we never go below base 8.
  */
-static void terminal_write_uint(uint32_t value, uint32_t base) {
+static void terminal_write_uint(uint64_t value, uint64_t base) {
 	const char *digits = "0123456789abcdef";
-	char buf[32];
+	char buf[64];
 	size_t i = 0;
 
 	/* Special case: the loop below produces nothing at all for zero, because
@@ -345,8 +340,8 @@ static void terminal_write_uint(uint32_t value, uint32_t base) {
 		terminal_putchar(buf[i]);
 }
 
-static void terminal_write_int(int32_t value) {
-	uint32_t magnitude;
+static void terminal_write_int(int64_t value) {
+	uint64_t magnitude;
 
 	if (value < 0) {
 		terminal_putchar('-');
@@ -359,9 +354,9 @@ static void terminal_write_int(int32_t value) {
 		 * type is defined as modular arithmetic, so this is well-defined and
 		 * gives exactly the magnitude we want. This is a real bug that ships
 		 * in real code. */
-		magnitude = -(uint32_t)value;
+		magnitude = -(uint64_t)value;
 	} else {
-		magnitude = (uint32_t)value;
+		magnitude = (uint64_t)value;
 	}
 
 	terminal_write_uint(magnitude, 10);
@@ -384,7 +379,7 @@ static void terminal_write_int(int32_t value) {
  */
 void kprintf(const char *fmt, ...) {
 	/* Held for the whole call, not per character, so a line comes out whole. */
-	uint32_t flags = console_lock();
+	uint64_t flags = console_lock();
 
 	va_list args;
 	va_start(args, fmt);      /* start reading after `fmt` */
@@ -397,15 +392,28 @@ void kprintf(const char *fmt, ...) {
 
 		i++;   /* step past the % to look at the specifier */
 
+		/* `l` means the argument is 64 bits wide. On a 32-bit build int and
+		 * long were the same size and this distinction did not exist; in
+		 * 64-bit it does, and getting it wrong reads half a value or two
+		 * halves of different ones. va_arg has no way to check. */
+		int is_long = 0;
+		if (fmt[i] == 'l') {
+			is_long = 1;
+			i++;
+		}
+
 		switch (fmt[i]) {
 		case 'd':
-			terminal_write_int(va_arg(args, int32_t));
+			terminal_write_int(is_long ? va_arg(args, int64_t)
+			                           : va_arg(args, int32_t));
 			break;
 		case 'u':
-			terminal_write_uint(va_arg(args, uint32_t), 10);
+			terminal_write_uint(is_long ? va_arg(args, uint64_t)
+			                            : va_arg(args, uint32_t), 10);
 			break;
 		case 'x':
-			terminal_write_uint(va_arg(args, uint32_t), 16);
+			terminal_write_uint(is_long ? va_arg(args, uint64_t)
+			                            : va_arg(args, uint32_t), 16);
 			break;
 		case 's':
 			terminal_write(va_arg(args, const char *));
