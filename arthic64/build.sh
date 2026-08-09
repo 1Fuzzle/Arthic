@@ -45,6 +45,7 @@ done
 for src in kernel/main.c kernel/idt.c kernel/shell.c \
            mm/pmm.c mm/paging.c mm/kheap.c \
            kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/pipe.c \
+           drivers/ata.c fs/fs.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
@@ -68,6 +69,17 @@ echo
 echo "built: arthic64.bin (and arthic64-boot.bin for QEMU)"
 
 if [ "$1" = "run" ]; then
+	# A disk image for the filesystem to live on, created once and kept
+	# between runs so files persist - the same reasoning as the 32-bit
+	# branch's arthic.img, just not the same file, since the two kernels
+	# use incompatible on-disk layouts.
+	DISK=arthic64.img
+	if [ ! -f "$DISK" ]; then
+		echo "creating $DISK (16 MB)"
+		dd if=/dev/zero of="$DISK" bs=1M count=16 2>/dev/null
+	fi
+
 	echo "starting qemu ..."
-	qemu-system-x86_64 -no-reboot -m 128M -kernel arthic64-boot.bin
+	qemu-system-x86_64 -no-reboot -m 128M -kernel arthic64-boot.bin \
+	    -drive file="$DISK",format=raw,if=ide
 fi

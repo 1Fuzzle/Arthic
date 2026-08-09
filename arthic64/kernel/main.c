@@ -22,6 +22,8 @@
 #include "syscall.h"
 #include "usermode.h"
 #include "task.h"
+#include "ata.h"
+#include "fs.h"
 
 void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 {
@@ -35,7 +37,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 	terminal_write(" \\_/ \\_/ \\_/ \\_/ \\_/ \\_/\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREY, VGA_BLACK));
-	terminal_write("Arthic 64 - stage 5\n");
+	terminal_write("Arthic 64 - stage 6\n");
 	terminal_write("Running in 64-bit long mode.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
@@ -82,8 +84,19 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 	syscall_install();
 	usermode_init();
 	task_init();
+
+	if (ata_init()) {
+		if (!fs_mount())
+			kprintf("Disk found, no ArthicFS on it - run 'format'.\n");
+	}
 	kprintf("TSS installed. SYSCALL/SYSRET armed via STAR/LSTAR/FMASK.\n");
-	kprintf("Scheduler running: preemptive round robin on the timer.\n\n");
+		kprintf("Scheduler running: preemptive round robin on the timer.\n");
+	if (ata_sector_count())
+		kprintf("Disk: %lu sectors, %lu MB. Filesystem %s.\n\n",
+		        (uint64_t) ata_sector_count(), (uint64_t) ata_sector_count() / 2048,
+		        fs_is_mounted() ? "mounted" : "not formatted");
+	else
+		kprintf("No disk attached.\n\n");
 
 	terminal_set_colour(vga_entry_colour(VGA_WHITE, VGA_BLACK));
 	kprintf("Interrupts enabled. Keyboard live. Type 'help'.\n\n");

@@ -23,14 +23,19 @@ Keep both. Do not delete v2.4 to make room for this.
   switched by the timer, with sleeping, blocking, and finished threads reaped
 - Mutexes (xchg-based, FIFO wait queue) and pipes (bounded ring buffer,
   blocking both ways) - direct ports; neither cares about register width
+- An ATA PIO disk driver and ArthicFS v2 (block-mapped files) - genuinely
+  DIRECT ports, no changes at all beyond a new build.sh entry. Files survive
+  a reboot on `arthic64.img`, separate from the 32-bit branch's disk image
+  since the two kernels use incompatible on-disk layouts (different FS_MAGIC).
 - A shell: `help`, `about`, `ticks`, `regs`, `mem`, `heap`, `heaptest`,
   `wxtest`, `user`, `tasks`, `spawn`, `kill`, `racetest`, `locktest`,
-  `pipetest`, `pipestat`, `echo`, `clear`
+  `pipetest`, `pipestat`, `ls`, `cat`, `write`, `append`, `rm`, `df`,
+  `format`, `echo`, `clear`
 
 ## What is not here yet
 
-disk driver, filesystem, ELF loader, per-process address spaces. All of that
-exists on the 32-bit branch and has to be brought across.
+ELF loader and per-process address spaces. All of that exists on the 32-bit
+branch and has to be brought across.
 
 ## Building
 

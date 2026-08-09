@@ -20,6 +20,8 @@
 #include "task.h"
 #include "lock.h"
 #include "pipe.h"
+#include "fs.h"
+#include "ata.h"
 #include "string.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -52,6 +54,13 @@ static void command_help(void)
 	kprintf("  locktest      the same test with a mutex\n");
 	kprintf("  pipetest      a producer and consumer sharing a pipe\n");
 	kprintf("  pipestat      pipe contents and how often each side blocked\n");
+	kprintf("  ls            list files\n");
+	kprintf("  cat <name>    print a file\n");
+	kprintf("  write <name> <text>   create a file\n");
+	kprintf("  append <name> <text>  add to the end of a file\n");
+	kprintf("  rm <name>     delete a file\n");
+	kprintf("  df            filesystem usage\n");
+	kprintf("  format        create a fresh filesystem (erases the disk)\n");
 	kprintf("  user          drop to ring 3, use SYSCALL, come back\n");
 	kprintf("  regs          show 64-bit CPU state\n");
 	kprintf("  echo <text>   print text back\n");
@@ -62,7 +71,7 @@ static void command_about(void)
 {
 	kprintf("Arthic 64, stage 4 of the long mode port.\n");
 	kprintf("Boots into 64-bit, handles interrupts, reads the keyboard.\n");
-	kprintf("Memory manager, paging, heap, TSS, SYSCALL, scheduler, locks, pipes.\n");
+	kprintf("Scheduler, locks, pipes, a disk, and a filesystem.\n");
 	kprintf("No filesystem, no per-process address spaces yet.\n");
 }
 
@@ -298,6 +307,154 @@ static void command_pipestat(void)
 	        reads, writes);
 }
 
+static const char *argument_after(const char *line, const char *command)
+{
+	if (!kstartswith(line, command))
+		return 0;
+
+	const char *p = line;
+	while (*p && *p != ' ') p++;
+	while (*p == ' ') p++;
+
+	return *p ? p : 0;
+}
+
+static void command_format(void)
+{
+	if (!ata_sector_count()) {
+		kprintf("no disk attached\n");
+		return;
+	}
+
+	kprintf("formatting - this erases everything on the disk\n");
+
+	if (fs_format())
+		kprintf("done. ArthicFS ready.\n");
+	else
+		kprintf("format failed\n");
+}
+
+static void command_df(void)
+{
+	uint32_t total, used, files;
+	fs_stats(&total, &used, &files);
+
+	if (!fs_is_mounted()) {
+		kprintf("no filesystem mounted\n");
+		return;
+	}
+
+	kprintf("  %lu blocks total, %lu used, %lu free  (512 bytes each)\n",
+	        (uint64_t) total, (uint64_t) used, (uint64_t)(total - used));
+	kprintf("  %lu files\n", (uint64_t) files);
+}
+
+static void command_write(const char *line)
+{
+	const char *rest = argument_after(line, "write ");
+
+	if (!rest) {
+		kprintf("usage: write <name> <text>\n");
+		return;
+	}
+
+	char name[FS_NAME_MAX];
+	uint32_t i = 0;
+
+	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
+		name[i] = rest[i];
+		i++;
+	}
+	name[i] = '\0';
+
+	const char *text = rest + i;
+	while (*text == ' ') text++;
+
+	uint32_t length = 0;
+	while (text[length]) length++;
+
+	if (length == 0) {
+		kprintf("usage: write <name> <text>\n");
+		return;
+	}
+
+	if (fs_create(name, text, length))
+		kprintf("wrote %lu bytes to %s\n", (uint64_t) length, name);
+	else
+		kprintf("could not write %s (exists, full, or no space)\n", name);
+}
+
+static void command_append(const char *line)
+{
+	const char *rest = argument_after(line, "append ");
+
+	if (!rest) {
+		kprintf("usage: append <name> <text>\n");
+		return;
+	}
+
+	char name[FS_NAME_MAX];
+	uint32_t i = 0;
+
+	while (rest[i] && rest[i] != ' ' && i < FS_NAME_MAX - 1) {
+		name[i] = rest[i];
+		i++;
+	}
+	name[i] = '\0';
+
+	const char *text = rest + i;
+	while (*text == ' ') text++;
+
+	uint32_t length = 0;
+	while (text[length]) length++;
+
+	if (length == 0) {
+		kprintf("usage: append <name> <text>\n");
+		return;
+	}
+
+	if (fs_append(name, text, length))
+		kprintf("appended %lu bytes to %s\n", (uint64_t) length, name);
+	else
+		kprintf("could not append to %s\n", name);
+}
+
+static void command_cat(const char *line)
+{
+	const char *name = argument_after(line, "cat ");
+
+	if (!name) {
+		kprintf("usage: cat <name>\n");
+		return;
+	}
+
+	static char contents[512];
+	uint32_t size = 0;
+
+	if (!fs_read(name, contents, sizeof(contents) - 1, &size)) {
+		kprintf("no such file: %s\n", name);
+		return;
+	}
+
+	contents[size] = '\0';
+	kprintf("%s\n", contents);
+}
+
+static void command_rm(const char *line)
+{
+	const char *name = argument_after(line, "rm ");
+
+	if (!name) {
+		kprintf("usage: rm <name>\n");
+		return;
+	}
+
+	if (fs_delete(name))
+		kprintf("deleted %s\n", name);
+	else
+		kprintf("no such file: %s\n", name);
+}
+
 static void command_tasks(void)
 {
 	task_list();
@@ -443,6 +600,20 @@ static void execute(const char *line)
 		command_pipetest();
 	else if (kstrcmp(line, "pipestat") == 0)
 		command_pipestat();
+	else if (kstrcmp(line, "ls") == 0)
+		fs_list();
+	else if (kstrcmp(line, "df") == 0)
+		command_df();
+	else if (kstrcmp(line, "format") == 0)
+		command_format();
+	else if (kstartswith(line, "write "))
+		command_write(line);
+	else if (kstartswith(line, "append "))
+		command_append(line);
+	else if (kstartswith(line, "cat "))
+		command_cat(line);
+	else if (kstartswith(line, "rm "))
+		command_rm(line);
 	else if (kstartswith(line, "kill "))
 		command_kill(line);
 	else if (kstrcmp(line, "wxtest") == 0)
