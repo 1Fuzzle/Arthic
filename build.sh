@@ -79,7 +79,7 @@ for src in boot/boot.s kernel/interrupts.s kernel/switch.s; do
 done
 
 # C sources
-for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c \
+for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c kernel/rand.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
            drivers/ata.c fs/fs.c; do
@@ -115,6 +115,7 @@ if [ "$1" = "run" ]; then
 	# the kernel would correctly detect it as unavailable and leave data pages
 	# executable. Real hardware has had NX since the mid-2000s; asking QEMU for
 	# it makes the emulator match.
-	qemu-system-i386 -no-reboot -m 128M -cpu qemu32,+pae,+nx -kernel arthic.bin \
-	    -drive file="$DISK",format=raw,if=ide
+qemu-system-i386 -no-reboot -m 128M -cpu qemu32,+pae,+nx -kernel arthic.bin \
+        -drive file="$DISK",format=raw,if=ide \
+        -serial file:qemu_output.log
 fi

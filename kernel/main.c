@@ -23,6 +23,7 @@
 #include "ata.h"
 #include "fs.h"
 #include "multiboot.h"
+#include "rand.h"
 
 /* ---- Entry point ----------------------------------------------------------
  * boot.s calls this. Note it never returns — an OS kernel has nothing to
@@ -143,8 +144,14 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	 * responds to the outside world. */
 	__asm__ volatile ("sti");
 
-	shell_init();
+	/* Seeded here rather than at the very top of kernel_main: it needs real
+	 * tick entropy, and ticks do not exist until the timer has been running
+	 * for a moment under interrupts. Seeding from zero every boot would make
+	 * ASLR pointless - the "random" address would be identical every time. */
+	rand_init();
 
+	shell_init();
+	
 	/* Idle forever. hlt stops the CPU until the next interrupt arrives,
 	 * which is why this loop uses no power — unlike a bare while(1), which
 	 * would spin a core at 100% doing nothing. */
