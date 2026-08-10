@@ -41,6 +41,13 @@ Keep both. Do not delete v2.4 to make room for this.
   and halted rather than silently corrupting the stack. `ssptest` in the shell
   demonstrates it.
 
+- **SMEP and SMAP**, both detected via CPUID and enabled through CR4. SMEP
+  stops the kernel executing code from a user-accessible page outright - a
+  corrupted function pointer landing in ring 3 memory now faults instead of
+  running. SMAP stops the kernel reading or writing user memory at all unless
+  explicitly permitted for a narrow window with STAC/CLAC - the two places in
+  `syscall.c` that touch a ring-3 pointer now bracket that access by name.
+
 At this point the two branches are at feature parity. Everything the 32-bit
 branch does, this one now does too - the remaining differences are the ones
 64-bit was built for: NX without PAE, more address space, a wider ABI.

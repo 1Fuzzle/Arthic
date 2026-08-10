@@ -19,6 +19,7 @@
 #include "kheap.h"
 #include "gdt.h"
 #include "ssp.h"
+#include "cpuprot.h"
 #include "tss.h"
 #include "syscall.h"
 #include "usermode.h"
@@ -84,6 +85,14 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi)
 
 	gdt_install();
 	kprintf("GDT installed: kernel + user segments, TSS slot ready.\n");
+
+	{
+		int protected = cpuprot_init();
+		kprintf("SMEP %s, SMAP %s%s\n",
+		        cpuprot_smep_available() ? "on" : "NOT available",
+		        cpuprot_smap_available() ? "on" : "NOT available",
+		        protected ? "" : " - some ring-0 protections are missing");
+	}
 
 	{
 		uint64_t rsp;

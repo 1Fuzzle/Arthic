@@ -39,6 +39,7 @@
 
 #include "syscall.h"
 #include "terminal.h"
+#include "cpuprot.h"
 #include "task.h"
 #include "string.h"
 
@@ -79,16 +80,28 @@ static int user_string_ok(uint64_t ptr, uint64_t max_length)
 	if (ptr < user_range_start || ptr >= user_range_end)
 		return 0;
 
+	/* This loop reads through a pointer ring 3 supplied - exactly what SMAP
+	 * exists to block by default. The range check above is what makes this
+	 * safe to actually do; STAC is what makes the CPU allow it at all once
+	 * SMAP is on. Narrow on purpose: lifted for this loop only, cleared
+	 * immediately after, rather than left open for the rest of the function. */
+	user_access_begin();
+
 	for (uint64_t i = 0; i < max_length; i++) {
 		uint64_t addr = ptr + i;
 
-		if (addr >= user_range_end)
+		if (addr >= user_range_end) {
+			user_access_end();
 			return 0;
+		}
 
-		if (*(const char *) addr == '\0')
+		if (*(const char *) addr == '\0') {
+			user_access_end();
 			return 1;
+		}
 	}
 
+	user_access_end();
 	return 0;
 }
 
@@ -104,7 +117,18 @@ void syscall_dispatch(struct syscall_frame *f)
 			f->rax = (uint64_t) -1;
 			return;
 		}
+
+		/* user_string_ok's own STAC/CLAC window already closed by the time
+		 * we get here - it only proved the string is well-formed, it did not
+		 * leave access open. terminal_write is about to walk the same
+		 * pointer again to actually copy the bytes, so it needs its own
+		 * bracket. Validating and then using a pointer are two separate
+		 * accesses and each needs its own permission window - one STAC does
+		 * not carry over to the other. */
+		user_access_begin();
 		terminal_write((const char *) f->rdi);
+		user_access_end();
+
 		f->rax = 0;
 		return;
 

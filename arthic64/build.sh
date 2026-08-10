@@ -101,7 +101,7 @@ done
 for src in kernel/main.c kernel/idt.c kernel/shell.c \
            mm/pmm.c mm/paging.c mm/kheap.c \
            kernel/gdt.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/pipe.c \
-           drivers/ata.c fs/fs.c kernel/loader.c kernel/ssp.c \
+           drivers/ata.c fs/fs.c kernel/loader.c kernel/ssp.c kernel/cpuprot.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            lib/string.c; do
 	obj="$BUILD/$(basename "$src" .c).o"
@@ -138,6 +138,9 @@ if [ "$1" = "run" ]; then
 	fi
 
 	echo "starting qemu ..."
-	qemu-system-x86_64 -no-reboot -m 128M -kernel arthic64-boot.bin \
+	# -cpu qemu64,+smep,+smap: the default CPU model does not advertise either
+	# feature, the same situation the 32-bit branch hit with NX. Real hardware
+	# has had SMEP since 2012 (Ivy Bridge) and SMAP since 2015 (Broadwell).
+	qemu-system-x86_64 -no-reboot -m 128M -cpu qemu64,+smep,+smap -kernel arthic64-boot.bin \
 	    -drive file="$DISK",format=raw,if=ide
 fi
