@@ -26,6 +26,7 @@
 #include "paging.h"
 #include "task.h"
 #include "pipe.h"
+#include "cpuprot.h"
 
 /* The one channel programs share. A real system would give each pipe an
  * identifier and let a program hold several; one global channel is enough to
@@ -86,16 +87,27 @@ static int user_string_ok(uint32_t ptr, uint32_t max_length)
 	if (ptr < user_range_start || ptr >= user_range_end)
 		return 0;
 
+	/* This loop reads through a pointer ring 3 supplied - exactly what SMAP
+	 * exists to block by default. The range check above is what makes this
+	 * safe to actually do; STAC is what makes the CPU allow it at all once
+	 * SMAP is on. */
+	user_access_begin();
+
 	for (uint32_t i = 0; i < max_length; i++) {
 		uint32_t addr = ptr + i;
 
-		if (addr >= user_range_end)
+		if (addr >= user_range_end) {
+			user_access_end();
 			return 0;                    /* ran off the end without a NUL */
+		}
 
-		if (*(const char *) addr == '\0')
+		if (*(const char *) addr == '\0') {
+			user_access_end();
 			return 1;                    /* properly terminated in range  */
+		}
 	}
 
+	user_access_end();
 	return 0;                            /* too long */
 }
 
@@ -153,7 +165,19 @@ static void syscall_dispatch(struct registers *regs)
 			regs->eax = (uint32_t) -1;
 			return;
 		}
+
+		/* user_string_ok's own STAC/CLAC window already closed - it only
+		 * proved the string is well-formed, it did not leave access open.
+		 * buffered_write is about to walk the same pointer again, character
+		 * by character, either in its own loop or inside terminal_write's
+		 * (the no-task-context fallback) - either way it is about to
+		 * dereference ring-3 memory again, and needs its own bracket for
+		 * that. Validating and then using a pointer are two separate
+		 * accesses; one STAC does not carry over to the other. */
+		user_access_begin();
 		buffered_write(task_current(), (const char *) regs->ebx);
+		user_access_end();
+
 		regs->eax = 0;
 		return;
 
@@ -190,7 +214,12 @@ static void syscall_dispatch(struct registers *regs)
 			return;
 		}
 
+		/* pipe_write reads directly from the buffer ring 3 gave us,
+		 * byte by byte - user_buffer_ok proved it is safe to touch;
+		 * this is the touching. */
+		user_access_begin();
 		regs->eax = pipe_write(&ipc_pipe, (const char *) regs->ebx, regs->ecx);
+		user_access_end();
 		return;
 
 	case SYS_PIPE_READ:
@@ -206,7 +235,12 @@ static void syscall_dispatch(struct registers *regs)
 			return;
 		}
 
+		/* pipe_read writes directly into the buffer ring 3 gave us - the
+		 * write direction is the other half of SMAP's protection, and it
+		 * needs the same bracket for the same reason as the write side. */
+		user_access_begin();
 		regs->eax = pipe_read(&ipc_pipe, (char *) regs->ebx, regs->ecx);
+		user_access_end();
 		return;
 
 	case SYS_EXIT: {

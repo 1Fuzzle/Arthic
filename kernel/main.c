@@ -23,12 +23,18 @@
 #include "ata.h"
 #include "fs.h"
 #include "multiboot.h"
+#include "ssp.h"
+#include "cpuprot.h"
 
 /* ---- Entry point ----------------------------------------------------------
  * boot.s calls this. Note it never returns — an OS kernel has nothing to
  * return to.
  */
 void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
+	/* First thing, deliberately, before anything else that might have a
+	 * local array and therefore a canary of its own. */
+	ssp_init();
+
 	terminal_initialise();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
@@ -90,6 +96,16 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
+	kprintf("Stack canaries active (real guard, not %%gs default).\n");
+
+	{
+		int protected = cpuprot_init();
+		kprintf("SMEP %s, SMAP %s%s\n",
+		        cpuprot_smep_available() ? "on" : "NOT available",
+		        cpuprot_smap_available() ? "on" : "NOT available",
+		        protected ? "" : " - some ring-0 protections are missing");
+	}
+
 	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
 	kprintf("PMM  installed: %u KB usable, %u KB in use.\n",
 	        pmm_free_frames() * 4, pmm_used_frames() * 4);

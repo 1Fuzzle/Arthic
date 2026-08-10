@@ -65,7 +65,14 @@ extern void usermode_return(void);
  * supervisor-only. No outb, because the TSS I/O bitmap denies port access. Its
  * entire vocabulary is `int $0x80`.
  */
-__attribute__((section(".usertext")))
+/* `no_stack_protector` is required, not optional, once the kernel build has
+ * the stack protector on: this function runs in ring 3 but is compiled with
+ * the KERNEL's flags, and the canary it would otherwise check is kernel-only
+ * memory ring 3 was never granted access to. Without this attribute, calling
+ * it produces a page fault reported as a generic "protection violation" with
+ * no obvious connection to stack protection - discovered the hard way on the
+ * 64-bit branch and applied here from the start instead. */
+__attribute__((section(".usertext"), no_stack_protector))
 static int user_syscall(int number, int arg)
 {
 	int result;
@@ -92,7 +99,9 @@ __attribute__((section(".userdata")))
 static const char user_message3[] =
 	"  [ring 3] now trying to read kernel memory directly\n";
 
-__attribute__((section(".usertext")))
+/* Runs in ring 3, so it needs no_stack_protector for the same reason
+ * user_syscall does. */
+__attribute__((section(".usertext"), no_stack_protector))
 void user_program(void)
 {
 	user_syscall(SYS_WRITE, (int)(uint32_t) user_message);

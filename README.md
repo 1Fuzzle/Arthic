@@ -3,7 +3,7 @@
 A 32-bit x86 kernel, built from nothing. It boots, takes control of the
 machine, handles interrupts, reads the keyboard, and gives you a shell.
 
-## Current state - v2.4
+## Current state - v2.6
 
 - Boots via GRUB/Multiboot into 32-bit protected mode
 - VGA text terminal with scrolling and a hardware cursor
@@ -12,6 +12,13 @@ machine, handles interrupts, reads the keyboard, and gives you a shell.
 - Own IDT: 32 CPU exception handlers, 16 IRQs, PIC remapped to vectors 32-47
 - PIT timer driving a tick counter
 - PS/2 keyboard driver with Shift and Caps Lock
+- Real stack canaries: `-fstack-protector-all` with a plain global guard
+  (`-mstack-protector-guard=global` - x86's default reads a TLS slot this
+  kernel does not have), checked on every function's return; `ssptest`
+  demonstrates a caught overflow
+- SMEP and SMAP: CPUID-detected, enabled through CR4. Every place the kernel
+  touches a ring-3 pointer directly - the string-length scan, the buffered
+  write, both pipe syscalls - brackets that access with STAC/CLAC by name
 - Physical memory manager: bitmap frame allocator driven by the BIOS memory map
 - Paging with PAE: three-level tables, 64-bit entries, all RAM identity-mapped,
   kernel code and rodata read-only, CR0.WP set, kernel pages supervisor-only,
@@ -199,82 +206,72 @@ Should be `0`.
 19. ~~Pipes for ring 3, program arguments, console lock~~ (v2.2)
 20. ~~Line buffering and block-mapped files~~ (v2.3)
 21. ~~NX via PAE - W^X complete~~ (v2.4)
-22. ~~64-bit long mode~~ - boots, four-level paging, memory manager, heap
-    (`long-mode` branch, stage 2)
+22. ~~64-bit long mode, brought to full parity~~ - boots, four-level paging,
+    memory manager, heap, real TSS with `SYSCALL`/`SYSRET`, scheduler, locks,
+    pipes, disk driver and filesystem, ELF64 loader with per-process address
+    spaces, stack canaries, SMEP/SMAP, and a guard page backed by an
+    IST-based double-fault handler (`long-mode` branch, stage 10)
+23. ~~Stack canaries on this branch~~ - `-fstack-protector-all` with a plain
+    global guard (`-mstack-protector-guard=global` - x86's default reads a
+    TLS slot this kernel does not have), `ssptest` demonstrating a caught
+    overflow
+24. ~~SMEP and SMAP~~ - CPUID-detected, enabled through CR4. Every place the
+    kernel touches a ring-3 pointer directly - the string-length scan, the
+    buffered write, both pipe syscalls - brackets that access with
+    STAC/CLAC by name instead of relying on an ordinary pointer dereference
+    that happens to work
 
 ### Planned
 
 Sizes are rough: **S** an evening, **M** a session or two, **L** several
 sessions, **XL** a project in its own right.
 
-**Bringing 64-bit to parity** - until this is done, `main` is the capable branch
-and `long-mode` is a demonstration.
+**Security hardening** - one item left, of the three just finished on
+`long-mode`.
 
-23. **TSS and ring 3 on 64-bit** (M) - the 64-bit TSS holds no task state at
-    all, only stack pointers, and gains the IST: seven known-good stacks the CPU
-    switches to for specific vectors, which is how a kernel survives a fault
-    caused by a broken stack pointer
-24. **`syscall`/`sysret`** (M) - a purpose-built instruction pair that skips the
-    IDT. It does not switch stacks for you, so the kernel does it by hand with
-    `swapgs` - get that wrong and you either corrupt a user pointer or leak a
-    kernel one
-25. **Scheduler and context switch on 64-bit** (M) - fifteen registers instead
-    of eight
-26. **Locks and pipes on 64-bit** (S) - nearly a straight copy; `xchg` is
-    identical
-27. **Disk driver and filesystem on 64-bit** (M) - port I/O does not care about
-    mode
-28. **ELF64 loader and processes** (L) - a PML4 per process rather than a PDPT
-
-**Security hardening**
-
-29. **Stack canaries** (S) - `-fno-stack-protector` is in the build flags only
-    because `__stack_chk_fail` does not exist. Write it, drop the flag. Ten
-    lines for a real mitigation.
-30. **SMEP and SMAP** (S) - two bits in CR4. One stops the kernel executing
-    userspace memory, the other stops it reading userspace memory outside
-    bracketed sections. Both close whole vulnerability classes.
-31. **Guard page under every stack** (S) - one unmapped page below each kernel
+25. **Guard page under every stack** (S) - one unmapped page below each kernel
     stack, so an overflow faults immediately instead of quietly eating the next
-    task's data
-32. **ASLR** (M) - load programs at a random address instead of always
-    `0x20000000`. Needs position-independent executables, which are nearly free
-    in 64-bit thanks to RIP-relative addressing.
-33. **A deliberate syscall audit** (M) - every syscall re-examined with the
+    task's data. Needs a working double-fault handler alongside it - see the
+    `long-mode` branch's stage 10 notes for why the guard page alone is not
+    enough on its own.
+26. **ASLR** (M) - load programs at a random address instead of always
+    `0x20000000`. Needs position-independent executables - a bigger lift here
+    than on `long-mode`, which gets RIP-relative addressing nearly for free.
+27. **A deliberate syscall audit** (M) - every syscall re-examined with the
     three-check rule (start in range, length sane, end in range). This is the
     surface that matters most.
 
 **Real system behaviour**
 
-34. **Serial output** (S) - a COM port driver so kernel output goes to a file on
+28. **Serial output** (S) - a COM port driver so kernel output goes to a file on
     the host instead of only to a screen you have to photograph. Highest value
     per line on this list.
-35. **Interrupt-driven disk I/O** (S) - the driver polls and blocks the CPU for
+29. **Interrupt-driven disk I/O** (S) - the driver polls and blocks the CPU for
     the whole transfer. Sleep the caller, wake it on IRQ 14.
-36. **A buffer cache** (M) - keep recently read blocks in memory. Every
+30. **A buffer cache** (M) - keep recently read blocks in memory. Every
     filesystem operation currently goes to the disk, including reading the same
     directory sector repeatedly.
-37. **Subdirectories** (M) - make a directory just another file whose contents
+31. **Subdirectories** (M) - make a directory just another file whose contents
     are directory entries. Removes both the 64-file limit and the flat namespace
     at once.
-38. **Crash consistency** (L) - a power cut mid-write can currently leave a
+32. **Crash consistency** (L) - a power cut mid-write can currently leave a
     directory entry pointing at unwritten data. Ordering helps; a journal is the
     real answer.
-39. **`fork` and `exec`** (L) - the Unix process model. `fork` needs
+33. **`fork` and `exec`** (L) - the Unix process model. `fork` needs
     copy-on-write, which needs the page fault handler to do real work rather
     than report and die. That is the piece that makes the memory manager feel
     finished.
 
 **Breadth**
 
-40. **APIC, HPET and the TSC** (M) - the PIC and PIT are 1981 hardware kept
+34. **APIC, HPET and the TSC** (M) - the PIC and PIT are 1981 hardware kept
     alive by emulation. The APIC is what real systems use and a prerequisite for
     more than one core.
-41. **SMP** (XL) - more than one CPU. Everything assuming a single core breaks:
+35. **SMP** (XL) - more than one CPU. Everything assuming a single core breaks:
     disabling interrupts stops *this* core only, so every interrupts-off section
     becomes a real spinlock. The change that would force the most rethinking,
     and worth doing for exactly that reason.
-42. **Networking** (XL) - an e1000 driver, then ARP, IP, UDP, eventually TCP.
+36. **Networking** (XL) - an e1000 driver, then ARP, IP, UDP, eventually TCP.
     The largest item here and the furthest from everything else, but "Arthic
     replied to a ping" is a good day.
 

@@ -44,6 +44,7 @@ static void command_help(void)
 	kprintf("  help          this list\n");
 	kprintf("  about         what Arthic is\n");
 	kprintf("  ticks         milliseconds-ish since boot, from the timer\n");
+	kprintf("  ssptest       deliberately overrun a buffer - should halt cleanly\n");
 	kprintf("  echo <text>   print text back\n");
 	kprintf("  mem           physical memory usage\n");
 	kprintf("  alloc         allocate one 4 KB frame and print its address\n");
@@ -129,6 +130,32 @@ static void command_wptest(void)
 		kprintf("SUCCEEDED - write protection is NOT working\n");
 	else
 		kprintf("blocked by the MMU, and the kernel recovered.\n");
+}
+
+/* Deliberately overrun a local array's bounds by exactly enough to reach
+ * past this function's canary.
+ *
+ * `volatile` on the buffer is required, not decoration: a plain local array
+ * written but never read is dead code to the optimiser, which deleted the
+ * entire loop the first time this pattern was written on the 64-bit branch -
+ * the canary machinery ran against nothing, and the test always "passed" for
+ * a reason unrelated to whether the protector actually worked. */
+__attribute__((noinline))
+static void smash_the_stack(void)
+{
+	volatile char buffer[16];
+
+	kprintf("writing 48 bytes into a 16-byte buffer ...\n");
+
+	for (int i = 0; i < 48; i++)
+		buffer[i] = 'X';
+
+	kprintf("SURVIVED - the stack protector did not catch this\n");
+}
+
+static void command_ssptest(void)
+{
+	smash_the_stack();
 }
 
 static void command_ticks(void)
@@ -720,6 +747,8 @@ static void execute(const char *line)
 		command_about();
 	else if (kstrcmp(line, "ticks") == 0)
 		command_ticks();
+	else if (kstrcmp(line, "ssptest") == 0)
+		command_ssptest();
 	else if (kstrcmp(line, "mem") == 0)
 		command_mem();
 	else if (kstrcmp(line, "alloc") == 0)
