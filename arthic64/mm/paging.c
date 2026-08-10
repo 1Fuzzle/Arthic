@@ -208,6 +208,18 @@ static void page_fault_handler(struct registers *regs)
 	        fetch   ? "instruction fetch" : (write ? "write" : "read"),
 	        user    ? "ring 3" : "ring 0",
 	        reserved ? ", reserved bit set" : "");
+
+	/* A ring 0 fault on a page that was never present, right below where a
+	 * kernel stack lives, is very likely a guard page doing its job rather
+	 * than a stray pointer - see the guard_phys field in kernel/task.c. This
+	 * is a hint for whoever reads the message, not a certainty: nothing here
+	 * cross-checks the address against any task's actual guard, since the
+	 * scheduler has no reason to hand that lookup to a fault handler that is
+	 * about to halt regardless. */
+	if (!user && !present)
+		kprintf("    (if this is just below a kernel stack, it is likely\n"
+		        "     the stack overflowing into its guard page)\n");
+
 	kprintf("    system halted.\n");
 
 	for (;;)

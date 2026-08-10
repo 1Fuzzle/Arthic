@@ -87,13 +87,13 @@ static const char *exception_names[32] = {
 };
 
 static void idt_set_gate(uint8_t num, uint64_t base, uint16_t selector,
-                         uint8_t flags)
+                         uint8_t flags, uint8_t ist)
 {
 	idt[num].base_low  = (uint16_t)(base & 0xFFFF);
 	idt[num].base_mid  = (uint16_t)((base >> 16) & 0xFFFF);
 	idt[num].base_high = (uint32_t)((base >> 32) & 0xFFFFFFFF);
 	idt[num].selector  = selector;
-	idt[num].ist       = 0;
+	idt[num].ist       = ist;
 	idt[num].flags     = flags;
 	idt[num].reserved  = 0;
 }
@@ -199,6 +199,38 @@ void isr_handler(struct registers *regs)
 		__asm__ volatile ("cli; hlt");
 }
 
+/* Vector 8, running on the IST1 stack from tss.c rather than whatever RSP0
+ * currently holds - see the long comment there for why that distinction is
+ * the entire reason this function exists.
+ *
+ * A double fault means the CPU already tried to deliver some OTHER
+ * exception and failed while doing it - almost always because pushing that
+ * exception's own frame faulted a second time. The registers below describe
+ * the double fault itself, not the original problem, and x86_64 does not
+ * hand us a reliable way to recover what the first exception actually was.
+ * That is not a gap in this handler; it is what "the machine's exception
+ * delivery mechanism itself broke" genuinely means - there is no more
+ * detailed story available to tell.
+ *
+ * err_code is always 0 for a double fault (unlike almost every other
+ * exception with an error code), so it is not printed - it would only
+ * suggest a precision that is not really there. */
+static void double_fault_handler(struct registers *regs)
+{
+	kprintf("\n*** DOUBLE FAULT\n");
+	kprintf("    rip=0x%lx  rsp=0x%lx  cs=0x%lx\n",
+	        regs->rip, regs->rsp, regs->cs);
+	kprintf("    the exception delivery mechanism itself failed - almost\n");
+	kprintf("    always because a fault's own stack push faulted again.\n");
+	kprintf("    if a kernel stack overflowed into its guard page, this\n");
+	kprintf("    is what catching that looks like: caught, not silently\n");
+	kprintf("    corrupted, but not something safe to continue past.\n");
+	kprintf("    system halted.\n");
+
+	for (;;)
+		__asm__ volatile ("cli; hlt");
+}
+
 /* A hardware interrupt. Normal traffic, not an error. */
 void irq_handler(struct registers *regs)
 {
@@ -230,7 +262,7 @@ void idt_install(void)
 	idt_pointer.base  = (uint64_t)&idt;
 
 	for (int i = 0; i < 256; i++)
-		idt_set_gate((uint8_t)i, 0, 0, 0);
+		idt_set_gate((uint8_t)i, 0, 0, 0, 0);
 
 	for (int i = 0; i < 16; i++)
 		irq_handlers[i] = 0;
@@ -250,55 +282,57 @@ void idt_install(void)
 	 * "Interrupt gate" rather than "trap gate" means the CPU clears the
 	 * interrupt flag on entry, so a handler is not itself interrupted
 	 * halfway through. */
-	idt_set_gate(0,  (uint64_t)isr0,  GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(1,  (uint64_t)isr1, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(2,  (uint64_t)isr2, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(3,  (uint64_t)isr3, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(4,  (uint64_t)isr4, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(5,  (uint64_t)isr5, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(6,  (uint64_t)isr6, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(7,  (uint64_t)isr7, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(8,  (uint64_t)isr8, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(9,  (uint64_t)isr9, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(10, (uint64_t)isr10, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(11, (uint64_t)isr11, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(12, (uint64_t)isr12, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(13, (uint64_t)isr13, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(14, (uint64_t)isr14, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(15, (uint64_t)isr15, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(16, (uint64_t)isr16, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(17, (uint64_t)isr17, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(18, (uint64_t)isr18, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(19, (uint64_t)isr19, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(20, (uint64_t)isr20, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(21, (uint64_t)isr21, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(22, (uint64_t)isr22, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(23, (uint64_t)isr23, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(24, (uint64_t)isr24, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(25, (uint64_t)isr25, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(26, (uint64_t)isr26, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(27, (uint64_t)isr27, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(28, (uint64_t)isr28, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(29, (uint64_t)isr29, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(30, (uint64_t)isr30, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(31, (uint64_t)isr31, GDT_KERNEL_CODE, 0x8E);
+	idt_set_gate(0,  (uint64_t)isr0,  GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(1,  (uint64_t)isr1, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(2,  (uint64_t)isr2, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(3,  (uint64_t)isr3, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(4,  (uint64_t)isr4, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(5,  (uint64_t)isr5, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(6,  (uint64_t)isr6, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(7,  (uint64_t)isr7, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(8,  (uint64_t)isr8, GDT_KERNEL_CODE, 0x8E, 1);   /* IST1 -
+	                          * double fault, the one exception that cannot
+	                          * trust RSP0 - see the long comment in tss.c. */
+	idt_set_gate(9,  (uint64_t)isr9, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(10, (uint64_t)isr10, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(11, (uint64_t)isr11, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(12, (uint64_t)isr12, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(13, (uint64_t)isr13, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(14, (uint64_t)isr14, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(15, (uint64_t)isr15, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(16, (uint64_t)isr16, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(17, (uint64_t)isr17, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(18, (uint64_t)isr18, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(19, (uint64_t)isr19, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(20, (uint64_t)isr20, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(21, (uint64_t)isr21, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(22, (uint64_t)isr22, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(23, (uint64_t)isr23, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(24, (uint64_t)isr24, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(25, (uint64_t)isr25, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(26, (uint64_t)isr26, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(27, (uint64_t)isr27, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(28, (uint64_t)isr28, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(29, (uint64_t)isr29, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(30, (uint64_t)isr30, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(31, (uint64_t)isr31, GDT_KERNEL_CODE, 0x8E, 0);
 
-	idt_set_gate(32, (uint64_t)irq0, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(33, (uint64_t)irq1, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(34, (uint64_t)irq2, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(35, (uint64_t)irq3, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(36, (uint64_t)irq4, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(37, (uint64_t)irq5, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(38, (uint64_t)irq6, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(39, (uint64_t)irq7, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(40, (uint64_t)irq8, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(41, (uint64_t)irq9, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(42, (uint64_t)irq10, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(43, (uint64_t)irq11, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(44, (uint64_t)irq12, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(45, (uint64_t)irq13, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(46, (uint64_t)irq14, GDT_KERNEL_CODE, 0x8E);
-	idt_set_gate(47, (uint64_t)irq15, GDT_KERNEL_CODE, 0x8E);
+	idt_set_gate(32, (uint64_t)irq0, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(33, (uint64_t)irq1, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(34, (uint64_t)irq2, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(35, (uint64_t)irq3, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(36, (uint64_t)irq4, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(37, (uint64_t)irq5, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(38, (uint64_t)irq6, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(39, (uint64_t)irq7, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(40, (uint64_t)irq8, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(41, (uint64_t)irq9, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(42, (uint64_t)irq10, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(43, (uint64_t)irq11, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(44, (uint64_t)irq12, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(45, (uint64_t)irq13, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(46, (uint64_t)irq14, GDT_KERNEL_CODE, 0x8E, 0);
+	idt_set_gate(47, (uint64_t)irq15, GDT_KERNEL_CODE, 0x8E, 0);
 
 	/* The syscall gate, and the ONLY entry with DPL 3.
 	 *
@@ -307,4 +341,8 @@ void idt_install(void)
 	 * gate is DPL 0 precisely so user code cannot invoke handlers directly. */
 
 	idt_flush(&idt_pointer);
+
+	/* Registered the same way page faults are - see the "registered handler
+	 * gets first refusal" comment in isr_handler above. */
+	isr_handlers[8] = double_fault_handler;
 }

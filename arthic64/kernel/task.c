@@ -108,12 +108,34 @@ uint32_t task_create_ex(const char *name, void (*entry)(void),
 
 	kmemset(t, 0, sizeof(*t));
 
-	uint64_t stack = pmm_alloc_frames(STACK_FRAMES);
-	if (!stack) {
+	/* One contiguous run of STACK_FRAMES + 1 frames. The guard has to be
+	 * genuinely adjacent to the usable stack - allocating it separately
+	 * would give no guarantee it lands next to anything, and an overflow
+	 * that misses it entirely defeats the whole point. The LOWEST frame of
+	 * the run becomes the guard, since the stack grows down toward it.
+	 *
+	 * Since every address space shares the SAME identity-mapped physical
+	 * RAM - that sharing is exactly what lets a CR3 switch be safe at all -
+	 * unmapping a physical address here removes it for every task, not just
+	 * this one. That is fine, and is in fact the point: the guard frame is
+	 * ALLOCATED (marked used in the PMM bitmap, so nothing else can be
+	 * handed the same physical memory) but never mapped anywhere while it
+	 * serves as a guard. It is restored to an ordinary mapped page in reap(),
+	 * before the frame is freed - skipping that step would leave a stale
+	 * unmapped hole that the next thing to reuse this physical memory would
+	 * silently inherit, faulting for a reason having nothing to do with it. */
+	uint64_t region = pmm_alloc_frames(STACK_FRAMES + 1);
+	if (!region) {
 		kfree(t);
 		return 0;
 	}
 
+	uint64_t guard = region;
+	uint64_t stack = region + PAGE_SIZE;
+
+	paging_unmap(guard);
+
+	t->guard_phys   = guard;
 	t->stack_base   = stack;
 	t->stack_frames = STACK_FRAMES;
 
@@ -176,6 +198,17 @@ static void reap(struct task *prev, struct task *dead)
 
 	for (uint64_t i = 0; i < dead->stack_frames; i++)
 		pmm_free_frame(dead->stack_base + i * PAGE_SIZE);
+
+	if (dead->guard_phys) {
+		/* Put the identity mapping back before this frame goes anywhere
+		 * near the free list. A future allocation of this same physical
+		 * memory expects it to work like ordinary RAM - leaving it unmapped
+		 * would make the NEXT thing to receive it fault immediately, for a
+		 * reason that has nothing to do with anything it did. */
+		paging_map(dead->guard_phys, dead->guard_phys,
+		          PAGE_PRESENT | PAGE_WRITE);
+		pmm_free_frame(dead->guard_phys);
+	}
 
 	kfree(dead);
 }

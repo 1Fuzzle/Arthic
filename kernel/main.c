@@ -23,13 +23,17 @@
 #include "ata.h"
 #include "fs.h"
 #include "multiboot.h"
-#include "rand.h"
+#include "ssp.h"
 
 /* ---- Entry point ----------------------------------------------------------
  * boot.s calls this. Note it never returns — an OS kernel has nothing to
  * return to.
  */
 void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
+	/* First thing, deliberately, before anything else that might have a
+	 * local array and therefore a canary of its own. */
+	ssp_init();
+
 	terminal_initialise();
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_CYAN, VGA_BLACK));
@@ -91,6 +95,7 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 
 	terminal_set_colour(vga_entry_colour(VGA_LIGHT_GREEN, VGA_BLACK));
 	kprintf("GDT installed: 5 entries, flat model, ring 0 + ring 3 ready.\n");
+	kprintf("Stack canaries active (real guard, not %%gs default).\n");
 	kprintf("IDT installed: 32 exception handlers, 16 IRQs, PIC remapped.\n");
 	kprintf("PMM  installed: %u KB usable, %u KB in use.\n",
 	        pmm_free_frames() * 4, pmm_used_frames() * 4);
@@ -144,14 +149,8 @@ void kernel_main(uint32_t magic, struct multiboot_info *mbi) {
 	 * responds to the outside world. */
 	__asm__ volatile ("sti");
 
-	/* Seeded here rather than at the very top of kernel_main: it needs real
-	 * tick entropy, and ticks do not exist until the timer has been running
-	 * for a moment under interrupts. Seeding from zero every boot would make
-	 * ASLR pointless - the "random" address would be identical every time. */
-	rand_init();
-
 	shell_init();
-	
+
 	/* Idle forever. hlt stops the CPU until the next interrupt arrives,
 	 * which is why this loop uses no power — unlike a bare while(1), which
 	 * would spin a core at 100% doing nothing. */

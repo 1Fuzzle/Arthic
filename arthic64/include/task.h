@@ -32,6 +32,15 @@ struct task {
 	enum task_state state;
 	uint64_t     stack_base;
 	uint64_t     stack_frames;
+
+	/* Physical address of the one page allocated immediately below
+	 * stack_base and deliberately left unmapped. A kernel stack overflow -
+	 * a runaway recursion, a local array bigger than intended - now runs into
+	 * unmapped memory and faults immediately, rather than silently
+	 * corrupting whatever used to sit there, which on this branch would be
+	 * the heap or another task's own memory. 0 if this task has no guard
+	 * (task 0 does not - see the note in task_init). */
+	uint64_t     guard_phys;
 	uint64_t     wake_tick;
 	uint64_t     kernel_stack_top;   /* TSS.RSP0 while this task runs */
 

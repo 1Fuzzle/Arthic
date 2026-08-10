@@ -49,6 +49,7 @@ static void command_help(void)
 	kprintf("  heaptest      exercise kmalloc and kfree\n");
 	kprintf("  wxtest        try to write to kernel code\n");
 	kprintf("  ssptest       deliberately overrun a buffer - should halt cleanly\n");
+	kprintf("  guardtest     recurse without bound - should hit the guard page\n");
 	kprintf("  tasks         list threads\n");
 	kprintf("  spawn         start a thread that counts to five\n");
 	kprintf("  kill <id>     terminate a task\n");
@@ -595,6 +596,66 @@ static void smash_the_stack(void)
 	kprintf("SURVIVED - the stack protector did not catch this\n");
 }
 
+/* Recurses without any base case, deliberately - the simplest way to
+ * genuinely exhaust a real stack rather than merely simulating the shape of
+ * doing so.
+ *
+ * Three separate optimisations had to be defeated to make this test actually
+ * test anything, and each one failed silently in exactly the same way: no
+ * crash, no guard page fault, just the recursion running forever with the
+ * screen showing nothing further - because none of the three failures
+ * actually GREW the stack at all.
+ *
+ * `noinline` stops the compiler folding this call into its caller. It does
+ * NOT stop a separate optimisation, sibling-call (tail-call) elimination:
+ * since this function's recursive call was the very last thing it did, GCC
+ * at -O2 rewrote it into a plain jump back to the top of the function,
+ * reusing ONE stack frame forever - an infinite loop wearing recursion's
+ * clothes, using constant stack space by construction. The volatile counter
+ * incremented AFTER the recursive call exists for exactly one reason: a
+ * proper tail call requires nothing meaningful to happen once it returns,
+ * and this call never returns, so anything genuinely dependent on it
+ * returning is enough to convince the compiler this cannot be treated as
+ * one.
+ *
+ * `volatile` on the stack buffer stops the write into it being deleted as an
+ * unobserved dead store, the same lesson as ssptest's buffer.
+ */
+static volatile uint64_t recursion_depth = 0;
+
+__attribute__((noinline))
+static void recurse_forever(void)
+{
+	volatile char eat_some_stack[128];
+	eat_some_stack[0] = 'X';
+
+	recurse_forever();
+
+	recursion_depth++;   /* unreachable, and that is exactly the point */
+}
+
+static void guard_test_thread(void)
+{
+	kprintf("recursing without bound - should hit the guard page below\n");
+	kprintf("this task's kernel stack, and fault, rather than corrupting\n");
+	kprintf("whatever memory happens to sit past the end of it\n");
+
+	recurse_forever();
+
+	/* Unreachable if the guard does its job. */
+	kprintf("SURVIVED - ran off the end of the stack without faulting\n");
+}
+
+static void command_guardtest(void)
+{
+	uint32_t id = task_create("guard", guard_test_thread);
+
+	if (id)
+		kprintf("spawned task %u to overflow its own stack\n", id);
+	else
+		kprintf("could not create the task\n");
+}
+
 static void command_ssptest(void)
 {
 	smash_the_stack();
@@ -698,6 +759,8 @@ static void execute(const char *line)
 		command_wxtest();
 	else if (kstrcmp(line, "ssptest") == 0)
 		command_ssptest();
+	else if (kstrcmp(line, "guardtest") == 0)
+		command_guardtest();
 	else if (kstrcmp(line, "regs") == 0)
 		command_regs();
 	else if (kstrcmp(line, "clear") == 0)

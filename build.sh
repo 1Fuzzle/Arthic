@@ -23,11 +23,21 @@ INCLUDE=include
 #   -mno-mmx -mno-sse ...     REQUIRED. Without these gcc vectorises loops into
 #                             SSE instructions, which the CPU refuses to run
 #                             before SSE is enabled in CR4 — triple fault.
-#   -fno-stack-protector      needs __stack_chk_fail, which we have not written
+#   -fstack-protector-all -mstack-protector-guard=global
+#                             a canary in every function, checked on return.
+#                             The guard=global part is not optional: x86's
+#                             DEFAULT reads the canary from a TLS slot this
+#                             kernel does not have (%gs:0x14 on i386) - see
+#                             kernel/ssp.c for what that looks like when it
+#                             goes unnoticed. -fno-stack-protector sat here in
+#                             every earlier version of this file only because
+#                             __stack_chk_guard and __stack_chk_fail did not
+#                             exist yet, not because stack smashing did not
+#                             matter.
 #   -I$INCLUDE                where our headers live
 #   -Wall -Wextra             warnings in kernel code are usually real bugs
 CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
-        -fno-builtin -fno-stack-protector -fno-pie -nostdlib \
+        -fno-builtin -fstack-protector-all -mstack-protector-guard=global -fno-pie -nostdlib \
         -I$INCLUDE -I$BUILD -Wall -Wextra -O2"
 
 ASFLAGS="-m32"
@@ -48,7 +58,12 @@ mkdir -p "$BUILD"
 # This is the honest version of "a program is just a file". Nothing about
 # prog.c knows it will be run by Arthic.
 echo "compiling  user/prog.c"
-gcc $CFLAGS -c user/prog.c -o "$BUILD/prog.o"
+# Deliberately NOT $CFLAGS here - the stack protector needs __stack_chk_fail,
+# which lives in kernel/ssp.c and is not linked into this standalone program.
+USER_CFLAGS="-m32 -std=gnu11 -ffreestanding -mno-mmx -mno-sse -mno-sse2 -mno-80387 \
+        -fno-builtin -fno-stack-protector -fno-pie -nostdlib \
+        -I$INCLUDE -Wall -Wextra -O2"
+gcc $USER_CFLAGS -c user/prog.c -o "$BUILD/prog.o"
 
 echo "linking    user program"
 ld -m elf_i386 -T user/prog.ld -o "$BUILD/prog.elf" "$BUILD/prog.o"
@@ -79,7 +94,7 @@ for src in boot/boot.s kernel/interrupts.s kernel/switch.s; do
 done
 
 # C sources
-for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c kernel/rand.c \
+for src in kernel/main.c kernel/gdt.c kernel/idt.c kernel/shell.c kernel/tss.c kernel/syscall.c kernel/usermode.c kernel/task.c kernel/lock.c kernel/loader.c kernel/pipe.c kernel/ssp.c \
            drivers/terminal.c drivers/keyboard.c drivers/timer.c \
            mm/pmm.c mm/paging.c mm/kheap.c lib/string.c \
            drivers/ata.c fs/fs.c; do
@@ -115,7 +130,6 @@ if [ "$1" = "run" ]; then
 	# the kernel would correctly detect it as unavailable and leave data pages
 	# executable. Real hardware has had NX since the mid-2000s; asking QEMU for
 	# it makes the emulator match.
-qemu-system-i386 -no-reboot -m 128M -cpu qemu32,+pae,+nx -kernel arthic.bin \
-        -drive file="$DISK",format=raw,if=ide \
-        -serial file:qemu_output.log
+	qemu-system-i386 -no-reboot -m 128M -cpu qemu32,+pae,+nx -kernel arthic.bin \
+	    -drive file="$DISK",format=raw,if=ide
 fi

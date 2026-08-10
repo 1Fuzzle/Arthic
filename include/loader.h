@@ -1,7 +1,6 @@
 /* loader.h - running a program that came from disk. */
 #ifndef ARTHIC_LOADER_H
 #define ARTHIC_LOADER_H
-#define ASLR_STACK_SLACK 0x10000u
 
 #include <stdint.h>
 
@@ -12,11 +11,6 @@
 #define USER_LOAD_ADDR   0x20000000u
 #define USER_STACK_TOP   0x20200000u
 #define USER_STACK_SIZE  8192u
-
-/* ASLR: each program's stack top is randomized within this many bytes below
- * USER_STACK_TOP, page-aligned. USER_STACK_TOP itself becomes the ceiling of
- * the arena rather than a fixed address any program actually uses. */
-#define ASLR_STACK_SLACK 0x10000u
 
 /* One page holding the argument string, mapped read-only. A fixed address
  * rather than something passed in a register: the program has no startup code
